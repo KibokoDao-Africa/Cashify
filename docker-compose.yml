@@ -1,0 +1,30 @@
+services:
+  bot:
+    build: .
+    ports:
+      - 5000:5000
+    volumes:
+      - .:./bot
+    env_file: .env
+    command:
+         - sh
+         - -c
+         - |
+            python3 -m flask run --host=0.0.0.0
+    restart: on-failure
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:alpine
+    volumes:
+      - redis_data:/data
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  redis:
