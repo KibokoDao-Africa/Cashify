@@ -4,13 +4,13 @@ services:
     ports:
       - 5000:5000
     volumes:
-      - .:./bot
+      - .:/bot
     env_file: .env
     command:
          - sh
          - -c
          - |
-            python3 -m flask run --host=0.0.0.0
+            python3 -m flask --debug run --host=0.0.0.0
     restart: on-failure
     depends_on:
       - redis
@@ -27,4 +27,4 @@ services:
       retries: 30
 
 volumes:
-  redis:
+  redis_data:

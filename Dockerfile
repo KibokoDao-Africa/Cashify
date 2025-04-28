@@ -1,6 +1,11 @@
 # use this image as the base
 FROM python:3.13-slim
 
+# set environment variables to prevent python from writing .pyc files and to flush stdout and stderr streams
+# to the console (useful for debugging)
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+
 # create a working directory in the container and cd into it
 WORKDIR /bot
 
