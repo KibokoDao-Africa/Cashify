@@ -224,6 +224,7 @@ def whatsapp_webhook():
                 
                 session["image"] = public_image_url
                 session["state"] = "AWAITING_DESCRIPTION"
+                set_session(from_number, session)
                 response.message("Great! I received your picture. Please enter a description for your item.")
                 
             except Exception as e:
@@ -236,6 +237,7 @@ def whatsapp_webhook():
         if incoming_text:
             session["description"] = incoming_text
             session["state"] = "AWAITING_PAYMENT"
+            set_session(from_number, session)
             response.message("Awesome! Now please proceed to payment for your ad fee.")
 
             # try:
@@ -336,10 +338,9 @@ def whatsapp_webhook():
     else:
         # Default case
         session["state"] = "INIT"
+        set_session(from_number, session)
         response.message("Welcome to Cashify! Please send a picture of the item you want to sell.")
 
-    # Save the updated session back to Redis
-    set_session(from_number, session)
     return str(response)
 
 
