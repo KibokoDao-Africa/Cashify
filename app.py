@@ -200,6 +200,8 @@ def whatsapp_webhook():
                 # Download the image from Twilio with auth
                 auth = (os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
                 image_response = requests.get(twilio_media_url, auth=auth)
+
+                current_app.logger.info(f"Image response: {image_response}")
                 
                 if image_response.status_code != 200:
                     response.message("Sorry, I couldn't download your image. Please try again.")
