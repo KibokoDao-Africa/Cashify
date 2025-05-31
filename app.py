@@ -1,10 +1,7 @@
 from flask import Flask, request, current_app, jsonify
-from twilio.rest import Client
-from twilio.twiml.messaging_response import Message, MessagingResponse
+import requests
 from pymongo import MongoClient
 import os
-import requests
-import time
 import uuid
 import json
 from datetime import datetime
@@ -18,6 +15,64 @@ mongo_client = MongoClient(os.getenv("MONGODB_URI", "mongodb://localhost:27017/"
 db = mongo_client[os.getenv("MONGODB_DATABASE", "cashify")]
 sessions_collection = db.sessions
 products_collection = db.products
+
+# Meta WhatsApp API Configuration
+WHATSAPP_TOKEN = os.getenv('WHATSAPP_ACCESS_TOKEN')
+WHATSAPP_PHONE_NUMBER_ID = os.getenv('WHATSAPP_PHONE_NUMBER_ID')
+VERIFY_TOKEN = os.getenv('WHATSAPP_VERIFY_TOKEN')
+WHATSAPP_API_URL = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+
+def send_whatsapp_message(to, message_text):
+    """
+    Send a text message using Meta WhatsApp Business API
+    """
+    headers = {
+        'Authorization': f'Bearer {WHATSAPP_TOKEN}',
+        'Content-Type': 'application/json'
+    }
+    
+    data = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {
+            "body": message_text
+        }
+    }
+    
+    try:
+        response = requests.post(WHATSAPP_API_URL, headers=headers, json=data)
+        response.raise_for_status()
+        current_app.logger.info(f"Message sent successfully to {to}")
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        current_app.logger.error(f"Failed to send message: {str(e)}")
+        return None
+
+def download_media_from_meta(media_id):
+    """
+    Download media from Meta's WhatsApp API
+    """
+    # First, get the media URL
+    media_url = f"https://graph.facebook.com/v18.0/{media_id}"
+    headers = {'Authorization': f'Bearer {WHATSAPP_TOKEN}'}
+    
+    try:
+        # Get media info
+        media_response = requests.get(media_url, headers=headers)
+        media_response.raise_for_status()
+        media_info = media_response.json()
+        
+        # Download the actual media file
+        file_url = media_info.get('url')
+        if file_url:
+            file_response = requests.get(file_url, headers=headers)
+            file_response.raise_for_status()
+            return file_response.content
+        
+    except requests.exceptions.RequestException as e:
+        current_app.logger.error(f"Failed to download media: {str(e)}")
+        return None
 
 def get_session(user_number):
     """
@@ -87,7 +142,7 @@ def get_all_products():
                 "description": product["description"],
                 "image_url": product["image_url"],
                 "created_at": product["created_at"].isoformat() if product.get("created_at") else None,
-                "user_number": product.get("user_number", "Anonymous")  # Optional: hide user number for privacy
+                "user_number": product.get("user_number", "Anonymous")
             }
             products.append(product_data)
         
@@ -148,150 +203,160 @@ def get_product(product_id):
             "error": "Failed to fetch product"
         }), 500
 
-@app.route("/whatsapp", methods=["POST"])
-def whatsapp_webhook():
-    current_app.logger.info("------------------------------Webhook Received------------------------------")
+@app.route("/webhook", methods=["GET", "POST"])
+def webhook():
+    """
+    Webhook for Meta WhatsApp Business API
+    """
+    if request.method == "GET":
+        # Webhook verification
+        mode = request.args.get("hub.mode")
+        token = request.args.get("hub.verify_token")
+        challenge = request.args.get("hub.challenge")
+        
+        if mode and token:
+            if mode == "subscribe" and token == VERIFY_TOKEN:
+                current_app.logger.info("Webhook verified successfully!")
+                return challenge
+            else:
+                current_app.logger.warning("Webhook verification failed!")
+                return "Verification failed", 403
+        
+        return "Bad request", 400
     
+    elif request.method == "POST":
+        # Handle incoming messages
+        data = request.get_json()
+        current_app.logger.info(f"Received webhook data: {json.dumps(data, indent=2)}")
+        
+        # Check if this is a WhatsApp message
+        if data.get("object") == "whatsapp_business_account":
+            entries = data.get("entry", [])
+            
+            for entry in entries:
+                changes = entry.get("changes", [])
+                
+                for change in changes:
+                    value = change.get("value", {})
+                    
+                    # Check for messages
+                    if "messages" in value:
+                        messages = value["messages"]
+                        
+                        for message in messages:
+                            process_whatsapp_message(message, value)
+        
+        return "OK", 200
 
-    # Parse the incoming message information from Twilio's POST data
-    from_number = request.form.get("From")
-    incoming_text = request.form.get("Body", "").strip()
-    num_media = int(request.form.get("NumMedia", "0"))
-
-    # Retrieve or initialize a session for this user via MongoDB
+def process_whatsapp_message(message, value):
+    """
+    Process incoming WhatsApp message
+    """
+    from_number = message.get("from")
+    message_id = message.get("id")
+    timestamp = message.get("timestamp")
+    
+    # Get message content
+    message_type = message.get("type")
+    message_text = ""
+    media_id = None
+    
+    if message_type == "text":
+        message_text = message.get("text", {}).get("body", "").strip()
+    elif message_type == "image":
+        media_id = message.get("image", {}).get("id")
+        message_text = message.get("image", {}).get("caption", "").strip()
+    
+    current_app.logger.info(f"Processing message from {from_number}: {message_text}")
+    
+    # Get or create session
     session = get_session(from_number)
     state = session.get("state", "INIT")
-
-    response = MessagingResponse()
-    current_app.logger.info(f"User {from_number} in state '{state}' sent message: {incoming_text}")
-
-    # ---------------------------------------------------------------------
-    # Reset Conversation
-    # ---------------------------------------------------------------------
-
-    if incoming_text == "RESET":
+    
+    # Handle reset command
+    if message_text.upper() == "RESET":
         session["state"] = "INIT"
         session.pop("image", None)
         session.pop("description", None)
         session.pop("payment_amount", None)
         session.pop("transaction_id", None)
-        response.message("Conversation reset. Please send a picture of the item you want to sell.")
+        session.pop("product_id", None)
+        send_whatsapp_message(from_number, "Conversation reset. Please send a picture of the item you want to sell.")
         set_session(from_number, session)
-        return str(response)
-
-    # ---------------------------------------------------------------------
-    # Conversation Flow
-    # ---------------------------------------------------------------------
-
+        return
+    
+    # Handle conversation flow
     if state == "INIT":
-        if num_media > 0:
-            # User has sent a media file (image)
-            twilio_media_url = request.form.get("MediaUrl0")
-            
+        if message_type == "image" and media_id:
+            # Download and save image
             try:
-                # Download the image from Twilio with auth
-                auth = (os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
-                image_response = requests.get(twilio_media_url, auth=auth)
-
-                current_app.logger.info(f"Image response: {image_response}")
-                
-                if image_response.status_code != 200:
-                    response.message("Sorry, I couldn't download your image. Please try again.")
-                    return str(response)
-                
-                # Create uploads directory if it doesn't exist
-                os.makedirs(os.path.join("static", "uploads"), exist_ok=True)
-                
-                # Generate a unique filename
-                filename = f"cashify_feed_{uuid.uuid4()}.jpg"
-                file_path = os.path.join("static", "uploads", filename)
-                
-                # Save the image locally
-                with open(file_path, "wb") as f:
-                    f.write(image_response.content)
-                
-                # Create a publicly accessible URL
-                public_image_url = f"{os.getenv('BASE_URL')}/static/uploads/{filename}"
-                current_app.logger.info(f"Media saved locally. Public URL: {public_image_url}")
-                
-                session["image"] = public_image_url
-                session["state"] = "AWAITING_DESCRIPTION"
-                set_session(from_number, session)
-                response.message("Great! I received your picture. Please enter a description for your item.")
-                
+                image_content = download_media_from_meta(media_id)
+                if image_content:
+                    # Create uploads directory if it doesn't exist
+                    os.makedirs(os.path.join("static", "uploads"), exist_ok=True)
+                    
+                    # Generate unique filename
+                    filename = f"cashify_feed_{uuid.uuid4()}.jpg"
+                    file_path = os.path.join("static", "uploads", filename)
+                    
+                    # Save image locally
+                    with open(file_path, "wb") as f:
+                        f.write(image_content)
+                    
+                    # Create public URL
+                    public_image_url = f"{os.getenv('BASE_URL')}/static/uploads/{filename}"
+                    current_app.logger.info(f"Media saved locally. Public URL: {public_image_url}")
+                    
+                    session["image"] = public_image_url
+                    session["state"] = "AWAITING_DESCRIPTION"
+                    set_session(from_number, session)
+                    
+                    send_whatsapp_message(from_number, "Great! I received your picture. Please enter a description for your item.")
+                else:
+                    send_whatsapp_message(from_number, "Sorry, I couldn't process your image. Please try again.")
             except Exception as e:
-                current_app.logger.error(f"Error processing media: {str(e)}")
-                response.message("Sorry, I couldn't process your image. Could you please try sending it again?")
+                current_app.logger.error(f"Error processing image: {str(e)}")
+                send_whatsapp_message(from_number, "Sorry, I couldn't process your image. Please try again.")
         else:
-            response.message("Hi! Please send me a picture of the item you want to sell.")
-
+            send_whatsapp_message(from_number, "Hi! Please send me a picture of the item you want to sell.")
+    
     elif state == "AWAITING_DESCRIPTION":
-        if incoming_text:
-            session["description"] = incoming_text
+        if message_text:
+            session["description"] = message_text
             session["state"] = "AWAITING_PAYMENT"
             set_session(from_number, session)
-            response.message("Awesome! Now please proceed to payment for your ad fee.")
-
+            
             # Save product to database
             try:
                 product_id = save_product(
                     user_number=from_number,
                     image_url=session.get("image"),
-                    description=incoming_text
+                    description=message_text
                 )
                 session["product_id"] = product_id
                 set_session(from_number, session)
                 current_app.logger.info(f"Product saved to database with ID: {product_id}")
             except Exception as e:
-                current_app.logger.error(f"Error saving product to database: {str(e)}")
-
-            # try:
-            #     # Initiate M-Pesa payment with amount 1 KES
-            #     success, result = initiate_payment(from_number, 1, "Cashify Ad Fee")
-            #     
-            #     if success:
-            #         # Update session state
-            #         session["state"] = "PAYMENT_INITIATED"
-            #         session["payment_amount"] = 1
-            #         
-            #         response.message("Payment request sent to your phone. Please enter your M-Pesa PIN to complete the transaction. We'll notify you once payment is confirmed.")
-            #     else:
-            #         response.message(f"Sorry, we couldn't process your payment request: {result}. Please try again.")
-            #         # reset session
-            #         session["state"] = "INIT"
-            #         session.pop("image", None)
-            #         session.pop("description", None)
-            #         session.pop("payment_amount", None)
-            #         session.pop("transaction_id", None)
-            #         set_session(from_number, session)
-            # except Exception as e:
-            #     response.message(f"Sorry, we couldn't process your payment request: {str(e)}. Please try again.")
-            #     # reset session
-            #     session["state"] = "INIT"
-            #     session.pop("image", None)
-            #     session.pop("description", None)
-            #     session.pop("payment_amount", None)
-            #     session.pop("transaction_id", None)
-            #     set_session(from_number, session)
-
+                current_app.logger.error(f"Error saving product: {str(e)}")
+            
+            # For now, skip payment and proceed directly to posting
+            # You can uncomment the M-Pesa integration later
+            # send_whatsapp_message(from_number, "Awesome! Now please proceed to payment for your ad fee.")
+            
+            # Process posting immediately (simulating successful payment)
             message_body = "Payment received!\n\n"
-                    
-            # Get item details for social media posting
+            
             image_url = session.get("image")
             description = session.get("description")
-            
-            # Create a list to track where posting succeeded
             posting_results = []
             
-            # Try to post to social media platforms if we have the necessary info
             if image_url and description:
                 current_app.logger.info("Posting to social media...")
-                # Prepare captions for different platforms
+                
                 insta_caption = f"FOR SALE: {description}\n\nContact us to purchase this item! #Cashify #ForSale"
                 story_caption = f"NEW ITEM: {description}"
                 fb_caption = f"🔥 NEW LISTING 🔥\n\nFOR SALE: {description}\n\nInterested? Contact us through WhatsApp! #Cashify #MarketplaceAlternative"
                 
-                # Try posting to each platform
                 try:
                     link = upload_to_facebook(image_url, fb_caption)
                     posting_results.append("Facebook post created with link: " + link)
@@ -313,14 +378,12 @@ def whatsapp_webhook():
                 posting_results = "\n".join(posting_results)
                 current_app.logger.info(f"Social media posting results: {posting_results}")
             
-            # Custom message based on posting results
             message_body += posting_results
-                
             message_body += "\n\nThank you for using Cashify!"
-
-            response.message(message_body)
-
-            # reset session
+            
+            send_whatsapp_message(from_number, message_body)
+            
+            # Reset session
             session["state"] = "INIT"
             session.pop("image", None)
             session.pop("description", None)
@@ -328,21 +391,16 @@ def whatsapp_webhook():
             session.pop("transaction_id", None)
             session.pop("product_id", None)
             set_session(from_number, session)
-
         else:
-            response.message("I didn't catch that. Please send me a text description for your item.")
+            send_whatsapp_message(from_number, "I didn't catch that. Please send me a text description for your item.")
     
     elif state == "PAYMENT_INITIATED":
-        response.message("We're still waiting for your payment confirmation. Please complete the M-Pesa prompt on your phone.")
-
+        send_whatsapp_message(from_number, "We're still waiting for your payment confirmation. Please complete the M-Pesa prompt on your phone.")
+    
     else:
-        # Default case
         session["state"] = "INIT"
         set_session(from_number, session)
-        response.message("Welcome to Cashify! Please send a picture of the item you want to sell.")
-
-    return str(response)
-
+        send_whatsapp_message(from_number, "Welcome to Cashify! Please send a picture of the item you want to sell.")
 
 @app.route("/mpesa-callback", methods=["POST"])
 def mpesa_callback():
@@ -350,27 +408,19 @@ def mpesa_callback():
     Handle callbacks from M-Pesa payment system
     """
     current_app.logger.info("------------------------------Callback Received------------------------------")
-
-    # Get the callback data from M-Pesa
+    
     callback_data = request.get_json()
     
-    # Check if the callback contains success information
     if 'Body' in callback_data and 'stkCallback' in callback_data['Body']:
         stk_callback = callback_data['Body']['stkCallback']
-        
-        # Extract the result code
         result_code = stk_callback.get('ResultCode')
         
-        if result_code == 0:  # Payment was successful
+        if result_code == 0:  # Payment successful
             current_app.logger.info("Payment successful!")
-            # Extract payment details
-            checkout_request_id = stk_callback.get('CheckoutRequestID')
             
-            # Extract callback metadata to identify the user
             if 'CallbackMetadata' in stk_callback and 'Item' in stk_callback['CallbackMetadata']:
                 items = stk_callback['CallbackMetadata']['Item']
                 
-                # Find the phone number in the metadata
                 phone_number = None
                 for item in items:
                     if item.get('Name') == 'PhoneNumber':
@@ -379,33 +429,30 @@ def mpesa_callback():
                 
                 if phone_number:
                     current_app.logger.info(f"Payment received from phone number: {phone_number}")
-
-                    # Format phone number for our session key (add "whatsapp:" prefix)
-                    whatsapp_number = f"whatsapp:+{phone_number}"
                     
-                    # Get user session
-                    session = get_session(whatsapp_number)
-
-                    message_body = "Payment received!\n\n"
+                    # Remove country code prefix if present for Meta API
+                    if phone_number.startswith('254'):
+                        phone_number = phone_number[3:]
+                    elif phone_number.startswith('+254'):
+                        phone_number = phone_number[4:]
                     
-                    # Check if this user is awaiting payment confirmation
+                    session = get_session(phone_number)
+                    
                     if session.get('state') == "PAYMENT_INITIATED":
+                        message_body = "Payment received!\n\n"
+                        
                         # Get item details for social media posting
                         image_url = session.get("image")
                         description = session.get("description")
-                        
-                        # Create a list to track where posting succeeded
                         posting_results = []
                         
-                        # Try to post to social media platforms if we have the necessary info
                         if image_url and description:
                             current_app.logger.info("Posting to social media...")
-                            # Prepare captions for different platforms
+                            
                             insta_caption = f"FOR SALE: {description}\n\nContact us to purchase this item! #Cashify #ForSale"
                             story_caption = f"NEW ITEM: {description}"
                             fb_caption = f"🔥 NEW LISTING 🔥\n\nFOR SALE: {description}\n\nInterested? Contact us through WhatsApp! #Cashify #MarketplaceAlternative"
                             
-                            # Try posting to each platform
                             try:
                                 link = upload_to_facebook(image_url, fb_caption)
                                 posting_results.append("Facebook post created with link: " + link)
@@ -427,46 +474,28 @@ def mpesa_callback():
                             posting_results = "\n".join(posting_results)
                             current_app.logger.info(f"Social media posting results: {posting_results}")
                         
-                        # Save the updated session
-                        set_session(whatsapp_number, session)
-                        
-                        # Custom message based on posting results
                         message_body += posting_results
+                        message_body += "\n\nThank you for using Cashify!"
                         
-                    message_body += "\n\nThank you for using Cashify!"
-
-                    # Send confirmation message to the user
-                    client = Client(os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
-
-                    # Get the Twilio number and ensure it has the whatsapp: prefix
-                    twilio_number = os.getenv('TWILIO_WHATSAPP_NUMBER')
-                    if not twilio_number.startswith('whatsapp:'):
-                        twilio_number = f"whatsapp:{twilio_number}"
-
-                    current_app.logger.info(f"Sending message to {whatsapp_number}: {message_body}")
-
-                    message = client.messages.create(
-                        body=message_body,
-                        from_=twilio_number,
-                        to=whatsapp_number
-                    )
-
-                    current_app.logger.info(f"Message sent with SID: {message.sid}")
-
-                    # reset session
-                    session["state"] = "INIT"
-                    session.pop("image", None)
-                    session.pop("description", None)
-                    session.pop("payment_amount", None)
-                    session.pop("transaction_id", None)
-                    session.pop("product_id", None)
-                    set_session(whatsapp_number, session)
+                        send_whatsapp_message(phone_number, message_body)
+                        
+                        # Reset session
+                        session["state"] = "INIT"
+                        session.pop("image", None)
+                        session.pop("description", None)
+                        session.pop("payment_amount", None)
+                        session.pop("transaction_id", None)
+                        session.pop("product_id", None)
+                        set_session(phone_number, session)
     
-    # Always return a success response to M-Pesa
-    return {
-        "ResultCode": 0,
-        "ResultDesc": "Accepted"
-    }
+    return {"ResultCode": 0, "ResultDesc": "Accepted"}
+
+# Static file serving (for uploaded images)
+@app.route('/static/uploads/<filename>')
+def uploaded_file(filename):
+    from flask import send_from_directory
+    return send_from_directory(os.path.join('static', 'uploads'), filename)
 
 if __name__ == "__main__":
     app.run(debug=True)
+    
