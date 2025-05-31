@@ -15,3 +15,6 @@ RUN pip3 install -r requirements.txt
 
 # copy source code to working directory
 COPY . .
+
+# run the bot
+CMD sh -c "python3 -m flask --debug run --host=0.0.0.0 --port=$PORT --no-reload"

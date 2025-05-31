@@ -1,160 +1,152 @@
-from flask import Flask, request, current_app
+from flask import Flask, request, current_app, jsonify
 from twilio.rest import Client
 from twilio.twiml.messaging_response import Message, MessagingResponse
-import redis
-import base64
+from pymongo import MongoClient
 import os
 import requests
-from requests.auth import HTTPBasicAuth
 import time
 import uuid
 import json
+from datetime import datetime
+from payment import initiate_payment
+from facebook_graph_api import upload_to_facebook, upload_to_instagram
 
 app = Flask(__name__)
 
-redis_client = redis.Redis(host=os.getenv("REDIS_HOST"), port=int(os.getenv("REDIS_PORT")), decode_responses=True)
+# MongoDB connection
+mongo_client = MongoClient(os.getenv("MONGODB_URI", "mongodb://localhost:27017/"))
+db = mongo_client[os.getenv("MONGODB_DATABASE", "cashify")]
+sessions_collection = db.sessions
+products_collection = db.products
 
 def get_session(user_number):
     """
-    Retrieves the session for the given user from Redis. 
+    Retrieves the session for the given user from MongoDB. 
     If none exists, create a new session with a default 'INIT' state.
     """
-    session_key = f"session:{user_number}"
-    session_json = redis_client.get(session_key)
-    if session_json is None:
-        session = {"state": "INIT"}
-        redis_client.set(session_key, json.dumps(session))
+    session_doc = sessions_collection.find_one({"user_number": user_number})
+    if session_doc is None:
+        session = {"user_number": user_number, "state": "INIT"}
+        sessions_collection.insert_one(session)
+        # Remove MongoDB's _id from the returned session
+        session.pop("_id", None)
         return session
     else:
-        return json.loads(session_json)
+        # Remove MongoDB's _id from the returned session
+        session_doc.pop("_id", None)
+        return session_doc
 
 def set_session(user_number, session):
     """
-    Stores/updates the session for the given user in Redis.
+    Stores/updates the session for the given user in MongoDB.
     """
-    session_key = f"session:{user_number}"
-    redis_client.set(session_key, json.dumps(session))
+    session["user_number"] = user_number
+    sessions_collection.update_one(
+        {"user_number": user_number},
+        {"$set": session},
+        upsert=True
+    )
 
-# get Oauth token from M-pesa
-def get_mpesa_token():
-    consumer_key = os.getenv('MPESA_CONSUMER_KEY')
-    consumer_secret = os.getenv('MPESA_CONSUMER_SECRET')
-    api_URL = "https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials"
-
-    # make a get request using python requests liblary
-    r = requests.get(api_URL, auth=HTTPBasicAuth(consumer_key, consumer_secret))
-
-    # return access_token from response
-    return r.json()['access_token']
-
-def lipa_na_mpesa(amount, phone_number, tx_desc):
-    access_token = get_mpesa_token()
-    api_url = "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest"
-    timestamp = time.strftime("%Y%m%d%H%M%S")
-    password = base64.b64encode((os.getenv('MPESA_BUSINESS_SHORTCODE') + os.getenv('MPESA_PASSKEY') + timestamp).encode()).decode()
-
-    headers = { "Authorization": f"Bearer {access_token}" }
-    request = {
-        "BusinessShortCode": os.getenv('MPESA_BUSINESS_SHORTCODE'),
-        "Password":  password,
-        "Timestamp": timestamp,
-        "TransactionType": "CustomerPayBillOnline",
-        "Amount": amount,
-        "PartyA": phone_number,
-        "PartyB": os.getenv('MPESA_BUSINESS_SHORTCODE'),
-        "PhoneNumber": phone_number,
-        "CallBackURL": f"{os.getenv('BASE_URL')}/mpesa-callback",
-        "AccountReference": "Cashify",
-        "TransactionDesc": tx_desc,
-        "Remarks": "Payment for ad fee",
+def save_product(user_number, image_url, description):
+    """
+    Save a product to the database
+    """
+    product = {
+        "user_number": user_number,
+        "image_url": image_url,
+        "description": description,
+        "created_at": datetime.utcnow(),
+        "status": "active"
     }
-    response = requests.post(api_url, json = request, headers=headers)
-    response = response.json()
-
-    if 'errorMessage' in response:   # fail
-        raise Exception(response['errorMessage'])
     
-    elif 'ResponseCode' in response and response['ResponseCode'] == '0':   # success
-        return response['ResponseDescription']
+    result = products_collection.insert_one(product)
+    current_app.logger.info(f"Product saved with ID: {result.inserted_id}")
+    return str(result.inserted_id)
 
-def upload_to_facebook(image_url, caption):
+@app.route("/products", methods=["GET"])
+def get_all_products():
     """
-    Upload an image to Facebook page
+    Public endpoint to get all products
     """
     try:
-        # Facebook API endpoint for posting to a page
-        facebook_url = f"https://graph.facebook.com/v19.0/{os.getenv('FACEBOOK_PAGE_ID')}/photos"
+        # Get query parameters for pagination
+        page = int(request.args.get('page', 1))
+        limit = int(request.args.get('limit', 20))
+        skip = (page - 1) * limit
         
-        # Parameters for the Facebook post
-        facebook_params = {
-            "access_token": os.getenv('FACEBOOK_PAGE_ACCESS_TOKEN'),
-            "url": image_url,  # The image URL
-            "caption": caption,  # The post text
-            "published": "true"  # Set to true to publish immediately
-        }
+        # Query products sorted by creation date (newest first)
+        products_cursor = products_collection.find(
+            {"status": "active"}
+        ).sort("created_at", -1).skip(skip).limit(limit)
         
-        response = requests.post(facebook_url, data=facebook_params)
-        result = response.json()
+        products = []
+        for product in products_cursor:
+            # Convert ObjectId to string and format the product
+            product_data = {
+                "id": str(product["_id"]),
+                "description": product["description"],
+                "image_url": product["image_url"],
+                "created_at": product["created_at"].isoformat() if product.get("created_at") else None,
+                "user_number": product.get("user_number", "Anonymous")  # Optional: hide user number for privacy
+            }
+            products.append(product_data)
         
-        if 'id' in result:
-            return f"https://www.facebook.com/photo/?fbid={result['id']}"
-        else:
-            current_app.logger.info(f"Facebook post error response: {result}")
-            raise Exception(f"Failed to post to Facebook: {result.get('error', {}).get('message', 'Unknown error')}")
-            
+        # Get total count for pagination info
+        total_products = products_collection.count_documents({"status": "active"})
+        
+        return jsonify({
+            "success": True,
+            "data": products,
+            "pagination": {
+                "current_page": page,
+                "limit": limit,
+                "total_products": total_products,
+                "total_pages": (total_products + limit - 1) // limit
+            }
+        })
+        
     except Exception as e:
-        current_app.logger.info(f"Facebook upload error: {str(e)}")
-        raise e
+        current_app.logger.error(f"Error fetching products: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to fetch products"
+        }), 500
 
-def upload_to_instagram(image_url, caption, story=False):
+@app.route("/products/<product_id>", methods=["GET"])
+def get_product(product_id):
     """
-    Upload an image to Instagram feed with the given caption
+    Get a specific product by ID
     """
     try:
-        # Instagram API endpoints
-        container_url = f"https://graph.facebook.com/v19.0/{os.getenv('INSTAGRAM_ACCOUNT_ID')}/media"
-        publish_url = f"https://graph.facebook.com/v19.0/{os.getenv('INSTAGRAM_ACCOUNT_ID')}/media_publish"
-
-        # Step 1: Create a media container
-        if story:
-            container_params = {
-                "access_token": os.getenv('INSTAGRAM_ACCESS_TOKEN'),
-                "image_url": image_url,
-                "media_type": "STORIES",
-                "story_sticker_ids": '[{"story_sticker_type":"MENTION","story_sticker_value":"' + caption + '"}]'
-            }
-        else:
-            container_params = {
-                "access_token": os.getenv('INSTAGRAM_ACCESS_TOKEN'),
-                "caption": caption,
-                "image_url": image_url
-            }
+        from bson import ObjectId
         
-        container_response = requests.post(container_url, data=container_params)
-        container_data = container_response.json()
+        product = products_collection.find_one({"_id": ObjectId(product_id)})
         
-        if 'id' not in container_data:
-            raise Exception(f"Failed to create media container: {container_data}")
+        if not product:
+            return jsonify({
+                "success": False,
+                "error": "Product not found"
+            }), 404
         
-        creation_id = container_data['id']
-        
-        # Step 2: Publish the container
-        publish_params = {
-            "access_token": os.getenv('INSTAGRAM_ACCESS_TOKEN'),
-            "creation_id": creation_id
+        product_data = {
+            "id": str(product["_id"]),
+            "description": product["description"],
+            "image_url": product["image_url"],
+            "created_at": product["created_at"].isoformat() if product.get("created_at") else None,
+            "user_number": product.get("user_number", "Anonymous")
         }
         
-        publish_response = requests.post(publish_url, data=publish_params)
-        publish_data = publish_response.json()
-        
-        if 'id' not in publish_data:
-            raise Exception(f"Failed to publish media: {publish_data}")
-        
-        return publish_data['id']  # Return the Instagram post ID
+        return jsonify({
+            "success": True,
+            "data": product_data
+        })
         
     except Exception as e:
-        current_app.logger.info(f"Instagram feed upload error: {str(e)}")
-        raise e
+        current_app.logger.error(f"Error fetching product {product_id}: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to fetch product"
+        }), 500
 
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_webhook():
@@ -166,7 +158,7 @@ def whatsapp_webhook():
     incoming_text = request.form.get("Body", "").strip()
     num_media = int(request.form.get("NumMedia", "0"))
 
-    # Retrieve or initialize a session for this user via Redis
+    # Retrieve or initialize a session for this user via MongoDB
     session = get_session(from_number)
     state = session.get("state", "INIT")
 
@@ -240,31 +232,38 @@ def whatsapp_webhook():
             set_session(from_number, session)
             response.message("Awesome! Now please proceed to payment for your ad fee.")
 
+            # Save product to database
+            try:
+                product_id = save_product(
+                    user_number=from_number,
+                    image_url=session.get("image"),
+                    description=incoming_text
+                )
+                session["product_id"] = product_id
+                set_session(from_number, session)
+                current_app.logger.info(f"Product saved to database with ID: {product_id}")
+            except Exception as e:
+                current_app.logger.error(f"Error saving product to database: {str(e)}")
+
             # try:
-            #     # Extract phone number from WhatsApp format (+254...)
-            #     # Strip "whatsapp:" prefix and any non-digit characters
-            #     clean_phone = ''.join(filter(str.isdigit, from_number.replace("whatsapp:", "")))
-                
-            #     # If number starts with "+" followed by country code, ensure it's in correct format for M-Pesa
-            #     if clean_phone.startswith('254'):
-            #         mpesa_phone = clean_phone
-            #     elif clean_phone.startswith('0'):
-            #         # Convert 07... to 2547...
-            #         mpesa_phone = '254' + clean_phone[1:]
+            #     # Initiate M-Pesa payment with amount 1 KES
+            #     success, result = initiate_payment(from_number, 1, "Cashify Ad Fee")
+            #     
+            #     if success:
+            #         # Update session state
+            #         session["state"] = "PAYMENT_INITIATED"
+            #         session["payment_amount"] = 1
+            #         
+            #         response.message("Payment request sent to your phone. Please enter your M-Pesa PIN to complete the transaction. We'll notify you once payment is confirmed.")
             #     else:
-            #         mpesa_phone = clean_phone
-                    
-            #     # Fixed ad fee amount (you can adjust this)
-            #     amount = 1  # KES
-                
-            #     # Initiate M-Pesa payment
-            #     result = lipa_na_mpesa(amount, mpesa_phone, "Cashify Ad Fee")
-                
-            #     # Update session state
-            #     session["state"] = "PAYMENT_INITIATED"
-            #     session["payment_amount"] = amount
-                
-            #     response.message("Payment request sent to your phone. Please enter your M-Pesa PIN to complete the transaction. We'll notify you once payment is confirmed.")
+            #         response.message(f"Sorry, we couldn't process your payment request: {result}. Please try again.")
+            #         # reset session
+            #         session["state"] = "INIT"
+            #         session.pop("image", None)
+            #         session.pop("description", None)
+            #         session.pop("payment_amount", None)
+            #         session.pop("transaction_id", None)
+            #         set_session(from_number, session)
             # except Exception as e:
             #     response.message(f"Sorry, we couldn't process your payment request: {str(e)}. Please try again.")
             #     # reset session
@@ -327,6 +326,7 @@ def whatsapp_webhook():
             session.pop("description", None)
             session.pop("payment_amount", None)
             session.pop("transaction_id", None)
+            session.pop("product_id", None)
             set_session(from_number, session)
 
         else:
@@ -459,6 +459,7 @@ def mpesa_callback():
                     session.pop("description", None)
                     session.pop("payment_amount", None)
                     session.pop("transaction_id", None)
+                    session.pop("product_id", None)
                     set_session(whatsapp_number, session)
     
     # Always return a success response to M-Pesa
