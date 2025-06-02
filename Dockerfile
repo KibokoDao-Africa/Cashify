@@ -17,4 +17,7 @@ RUN pip3 install -r requirements.txt
 COPY . .
 
 # run the application using gunicorn
-CMD ["gunicorn", "-b", "0.0.0.0:$PORT", "app:app"]
+CMD sh -c "gunicorn -b 0.0.0.0:${PORT} app:app"
+
+# expose the port the app runs on
+EXPOSE ${PORT}
