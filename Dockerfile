@@ -16,5 +16,5 @@ RUN pip3 install -r requirements.txt
 # copy source code to working directory
 COPY . .
 
-# run the bot
+# run the application using gunicorn
 CMD ["gunicorn", "-b", "0.0.0.0:$PORT", "app:app"]
