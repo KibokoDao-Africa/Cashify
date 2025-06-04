@@ -12,6 +12,7 @@ from io import BytesIO
 from datetime import datetime
 from payment import initiate_payment
 from facebook_graph_api import upload_to_facebook, upload_to_instagram
+from bson import ObjectId
 
 app = Flask(__name__)
 
@@ -83,6 +84,37 @@ def set_session(user_number, session):
         upsert=True
     )
 
+def get_user_products(user_number):
+    """
+    Get all active products for a given user
+    """
+    products = products_collection.find({
+        "user_number": user_number,
+        "status": "active",
+        "sold": False
+    }).sort("created_at", -1)
+    
+    result = []
+    for product in products:
+        result.append({
+            "id": str(product["_id"]),
+            "description": product.get("description", ""),
+            "selling_price": product.get("selling_price", "")
+        })
+    
+    return result
+
+def mark_product_as_sold(product_id):
+    """
+    Mark a product as sold in the database
+    """
+    result = products_collection.update_one(
+        {"_id": ObjectId(product_id)},
+        {"$set": {"sold": True}}
+    )
+    
+    return result.modified_count > 0
+
 def save_product(user_number, image_url, description, category, condition, buying_price, 
                 selling_price, reason_for_selling, location, contact):
     """
@@ -100,7 +132,8 @@ def save_product(user_number, image_url, description, category, condition, buyin
         "location": location,
         "contact": contact,
         "created_at": datetime.utcnow(),
-        "status": "active"
+        "status": "active",
+        "sold": False
     }
     
     result = products_collection.insert_one(product)
@@ -119,8 +152,9 @@ def get_all_products():
         skip = (page - 1) * limit
         
         # Query products sorted by creation date (newest first)
+        # Only return active and unsold products
         products_cursor = products_collection.find(
-            {"status": "active"}
+            {"status": "active", "sold": False}
         ).sort("created_at", -1).skip(skip).limit(limit)
         
         products = []
@@ -143,7 +177,7 @@ def get_all_products():
             products.append(product_data)
         
         # Get total count for pagination info
-        total_products = products_collection.count_documents({"status": "active"})
+        total_products = products_collection.count_documents({"status": "active", "sold": False})
         
         return jsonify({
             "success": True,
@@ -169,8 +203,6 @@ def get_product(product_id):
     Get a specific product by ID
     """
     try:
-        from bson import ObjectId
-        
         product = products_collection.find_one({"_id": ObjectId(product_id)})
         
         if not product:
@@ -191,7 +223,8 @@ def get_product(product_id):
             "location": product.get("location", ""),
             "contact": product.get("contact", ""),
             "created_at": product["created_at"].isoformat() if product.get("created_at") else None,
-            "user_number": product.get("user_number", "Anonymous")
+            "user_number": product.get("user_number", "Anonymous"),
+            "sold": product.get("sold", False)
         }
         
         return jsonify({
@@ -210,7 +243,6 @@ def get_product(product_id):
 def whatsapp_webhook():
     current_app.logger.info("------------------------------Webhook Received------------------------------")
     
-
     # Parse the incoming message information from Twilio's POST data
     from_number = request.form.get("From")
     incoming_text = request.form.get("Body", "").strip()
@@ -227,7 +259,7 @@ def whatsapp_webhook():
     # Reset Conversation
     # ---------------------------------------------------------------------
 
-    if incoming_text == "RESET":
+    if incoming_text.upper() == "RESET":
         session["state"] = "INIT"
         session.pop("image", None)
         session.pop("description", None)
@@ -240,7 +272,8 @@ def whatsapp_webhook():
         session.pop("contact", None)
         session.pop("payment_amount", None)
         session.pop("transaction_id", None)
-        response.message("Conversation reset. Please send a picture of the item you want to sell.")
+        session.pop("products", None)
+        response.message("Welcome to Cashify! Please send me a picture to post a new item for sale, or type SOLD to mark one of your items as sold.")
         set_session(from_number, session)
         return str(response)
 
@@ -249,7 +282,29 @@ def whatsapp_webhook():
     # ---------------------------------------------------------------------
 
     if state == "INIT":
-        if num_media > 0:
+        if incoming_text.upper() == "SOLD":
+            # User wants to mark a product as sold
+            products = get_user_products(from_number)
+            
+            if not products:
+                response.message("You don't have any active products to mark as sold.")
+                return str(response)
+            
+            # Create a list of products for the user to choose from
+            product_list = "Your active products:\n\n"
+            for i, product in enumerate(products):
+                product_list += f"{i+1}. {product['description']} - ${product['selling_price']}\n"
+            
+            product_list += "\nReply with the number of the product you want to mark as sold:"
+            
+            # Store products in session for reference when they select one
+            session["products"] = products
+            session["state"] = "AWAITING_PRODUCT_SELECTION"
+            set_session(from_number, session)
+            
+            response.message(product_list)
+        
+        elif num_media > 0:
             # User has sent a media file (image)
             twilio_media_url = request.form.get("MediaUrl0")
             
@@ -285,7 +340,36 @@ def whatsapp_webhook():
                 current_app.logger.error(f"Error processing media: {str(e)}")
                 response.message("Sorry, I couldn't process your image. Could you please try sending it again?")
         else:
-            response.message("Hi! Please send me a picture of the item you want to sell.")
+            response.message("Hi! Send me a picture to post a new item for sale, or type SOLD to mark one of your items as sold.")
+
+    elif state == "AWAITING_PRODUCT_SELECTION":
+        try:
+            selection = int(incoming_text)
+            products = session.get("products", [])
+            
+            if 1 <= selection <= len(products):
+                selected_product = products[selection - 1]
+                product_id = selected_product["id"]
+                
+                # Mark the product as sold
+                success = mark_product_as_sold(product_id)
+                
+                if success:
+                    response.message(f"✅ Your product \"{selected_product['description']}\" has been marked as sold!")
+                else:
+                    response.message("❌ Sorry, we couldn't mark the product as sold. Please try again.")
+                
+                # Reset session
+                session["state"] = "INIT"
+                session.pop("products", None)
+                set_session(from_number, session)
+            else:
+                response.message(f"Please enter a valid number between 1 and {len(products)}.")
+        except ValueError:
+            response.message("Please enter a valid number.")
+        except Exception as e:
+            current_app.logger.error(f"Error marking product as sold: {str(e)}")
+            response.message("Sorry, something went wrong. Please try again.")
 
     elif state == "AWAITING_DESCRIPTION":
         if incoming_text:
@@ -551,7 +635,7 @@ def whatsapp_webhook():
         # Default case
         session["state"] = "INIT"
         set_session(from_number, session)
-        response.message("Welcome to Cashify! Please send a picture of the item you want to sell.")
+        response.message("Welcome to Cashify! Please send me a picture to post a new item for sale, or type SOLD to mark one of your items as sold.")
 
     return str(response)
 
@@ -702,3 +786,4 @@ def mpesa_callback():
 
 if __name__ == "__main__":
     app.run(debug=True)
+    
