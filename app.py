@@ -47,14 +47,22 @@ def set_session(user_number, session):
         upsert=True
     )
 
-def save_product(user_number, image_url, description):
+def save_product(user_number, image_url, description, category, condition, buying_price, 
+                selling_price, reason_for_selling, location, contact):
     """
-    Save a product to the database
+    Save a product to the database with all details
     """
     product = {
         "user_number": user_number,
         "image_url": image_url,
         "description": description,
+        "category": category,
+        "condition": condition,
+        "buying_price": buying_price,
+        "selling_price": selling_price,
+        "reason_for_selling": reason_for_selling,
+        "location": location,
+        "contact": contact,
         "created_at": datetime.utcnow(),
         "status": "active"
     }
@@ -86,8 +94,15 @@ def get_all_products():
                 "id": str(product["_id"]),
                 "description": product["description"],
                 "image_url": product["image_url"],
+                "category": product.get("category", ""),
+                "condition": product.get("condition", ""),
+                "buying_price": product.get("buying_price", ""),
+                "selling_price": product.get("selling_price", ""),
+                "reason_for_selling": product.get("reason_for_selling", ""),
+                "location": product.get("location", ""),
+                "contact": product.get("contact", ""),
                 "created_at": product["created_at"].isoformat() if product.get("created_at") else None,
-                "user_number": product.get("user_number", "Anonymous")  # Optional: hide user number for privacy
+                "user_number": product.get("user_number", "Anonymous")
             }
             products.append(product_data)
         
@@ -132,6 +147,13 @@ def get_product(product_id):
             "id": str(product["_id"]),
             "description": product["description"],
             "image_url": product["image_url"],
+            "category": product.get("category", ""),
+            "condition": product.get("condition", ""),
+            "buying_price": product.get("buying_price", ""),
+            "selling_price": product.get("selling_price", ""),
+            "reason_for_selling": product.get("reason_for_selling", ""),
+            "location": product.get("location", ""),
+            "contact": product.get("contact", ""),
             "created_at": product["created_at"].isoformat() if product.get("created_at") else None,
             "user_number": product.get("user_number", "Anonymous")
         }
@@ -173,6 +195,13 @@ def whatsapp_webhook():
         session["state"] = "INIT"
         session.pop("image", None)
         session.pop("description", None)
+        session.pop("category", None)
+        session.pop("condition", None)
+        session.pop("buying_price", None)
+        session.pop("selling_price", None)
+        session.pop("reason_for_selling", None)
+        session.pop("location", None)
+        session.pop("contact", None)
         session.pop("payment_amount", None)
         session.pop("transaction_id", None)
         response.message("Conversation reset. Please send a picture of the item you want to sell.")
@@ -228,16 +257,146 @@ def whatsapp_webhook():
     elif state == "AWAITING_DESCRIPTION":
         if incoming_text:
             session["description"] = incoming_text
+            session["state"] = "AWAITING_CATEGORY"
+            set_session(from_number, session)
+            
+            # Send category options
+            categories = ["Electronics", "Clothing", "Furniture", "Vehicles", 
+                         "Home Appliances", "Real Estate", "Services", "Other"]
+            category_message = "Please select a category for your item by typing the number:\n\n" + \
+                               "\n".join([f"{i+1}. {cat}" for i, cat in enumerate(categories)])
+            
+            response.message(category_message)
+        else:
+            response.message("I didn't catch that. Please send me a text description for your item.")
+
+    elif state == "AWAITING_CATEGORY":
+        categories = ["Electronics", "Clothing", "Furniture", "Vehicles", 
+                     "Home Appliances", "Real Estate", "Services", "Other"]
+        
+        try:
+            # Handle both number input and text input
+            if incoming_text.isdigit() and 1 <= int(incoming_text) <= len(categories):
+                selected_category = categories[int(incoming_text) - 1]
+            elif incoming_text in categories:
+                selected_category = incoming_text
+            else:
+                raise ValueError("Invalid category")
+            
+            session["category"] = selected_category
+            session["state"] = "AWAITING_CONDITION"
+            set_session(from_number, session)
+            
+            # Send condition options
+            conditions = ["New", "Used - Like New", "Used - Good", "Used - Fair"]
+            condition_message = "Please select the condition by typing the number:\n\n" + \
+                               "\n".join([f"{i+1}. {cond}" for i, cond in enumerate(conditions)])
+            
+            response.message(condition_message)
+        except:
+            category_options = "\n".join([f"{i+1}. {cat}" for i, cat in enumerate(categories)])
+            response.message(f"Please select a valid category number or name:\n\n{category_options}")
+    
+    elif state == "AWAITING_CONDITION":
+        conditions = ["New", "Used - Like New", "Used - Good", "Used - Fair"]
+        
+        try:
+            # Handle both number input and text input
+            if incoming_text.isdigit() and 1 <= int(incoming_text) <= len(conditions):
+                selected_condition = conditions[int(incoming_text) - 1]
+            elif incoming_text in conditions or incoming_text.lower() in [c.lower() for c in conditions]:
+                selected_condition = incoming_text
+            else:
+                raise ValueError("Invalid condition")
+            
+            session["condition"] = selected_condition
+            session["state"] = "AWAITING_BUYING_PRICE"
+            set_session(from_number, session)
+            
+            response.message("Please enter the buying price (numbers only):")
+        except:
+            condition_options = "\n".join([f"{i+1}. {cond}" for i, cond in enumerate(conditions)])
+            response.message(f"Please select a valid condition number or name:\n\n{condition_options}")
+    
+    elif state == "AWAITING_BUYING_PRICE":
+        try:
+            # Validate it's a number (can be float)
+            buying_price = float(incoming_text.replace(',', ''))
+            
+            session["buying_price"] = buying_price
+            session["state"] = "AWAITING_SELLING_PRICE"
+            set_session(from_number, session)
+            
+            response.message("Please enter your selling price (numbers only):")
+        except:
+            response.message("Please enter a valid buying price (numbers only):")
+    
+    elif state == "AWAITING_SELLING_PRICE":
+        try:
+            # Validate it's a number (can be float)
+            selling_price = float(incoming_text.replace(',', ''))
+            
+            session["selling_price"] = selling_price
+            session["state"] = "AWAITING_REASON"
+            set_session(from_number, session)
+            
+            response.message("Please provide a brief reason for selling:")
+        except:
+            response.message("Please enter a valid selling price (numbers only):")
+    
+    elif state == "AWAITING_REASON":
+        if incoming_text:
+            session["reason_for_selling"] = incoming_text
+            session["state"] = "AWAITING_LOCATION"
+            set_session(from_number, session)
+            
+            response.message("Please share your location (city/town):")
+        else:
+            response.message("I didn't catch that. Please provide a reason for selling.")
+    
+    elif state == "AWAITING_LOCATION":
+        if incoming_text:
+            session["location"] = incoming_text
+            session["state"] = "AWAITING_CONTACT"
+            set_session(from_number, session)
+            
+            response.message("Please provide your preferred contact information for buyers (phone or email):")
+        else:
+            response.message("I didn't catch that. Please provide your location.")
+    
+    elif state == "AWAITING_CONTACT":
+        if incoming_text:
+            session["contact"] = incoming_text
             session["state"] = "AWAITING_PAYMENT"
             set_session(from_number, session)
-            response.message("Awesome! Now please proceed to payment for your ad fee.")
+            
+            # Display item summary
+            summary = "📝 Here's your listing summary:\n\n"
+            summary += f"• Description: {session['description']}\n"
+            summary += f"• Category: {session['category']}\n"
+            summary += f"• Condition: {session['condition']}\n"
+            summary += f"• Buying Price: {session['buying_price']}\n"
+            summary += f"• Selling Price: {session['selling_price']}\n"
+            summary += f"• Reason for Selling: {session['reason_for_selling']}\n"
+            summary += f"• Location: {session['location']}\n"
+            summary += f"• Contact: {session['contact']}\n\n"
+            summary += "Please proceed to payment for your ad fee."
+            
+            response.message(summary)
 
-            # Save product to database
+            # Save complete product info to database
             try:
                 product_id = save_product(
                     user_number=from_number,
                     image_url=session.get("image"),
-                    description=incoming_text
+                    description=session.get("description"),
+                    category=session.get("category"),
+                    condition=session.get("condition"),
+                    buying_price=session.get("buying_price"),
+                    selling_price=session.get("selling_price"),
+                    reason_for_selling=session.get("reason_for_selling"),
+                    location=session.get("location"),
+                    contact=session.get("contact")
                 )
                 session["product_id"] = product_id
                 set_session(from_number, session)
@@ -279,6 +438,11 @@ def whatsapp_webhook():
             # Get item details for social media posting
             image_url = session.get("image")
             description = session.get("description")
+            category = session.get("category", "")
+            condition = session.get("condition", "")
+            selling_price = session.get("selling_price", "")
+            location = session.get("location", "")
+            contact = session.get("contact", "")
             
             # Create a list to track where posting succeeded
             posting_results = []
@@ -286,10 +450,18 @@ def whatsapp_webhook():
             # Try to post to social media platforms if we have the necessary info
             if image_url and description:
                 current_app.logger.info("Posting to social media...")
-                # Prepare captions for different platforms
-                insta_caption = f"FOR SALE: {description}\n\nContact us to purchase this item! #Cashify #ForSale"
-                story_caption = f"NEW ITEM: {description}"
-                fb_caption = f"🔥 NEW LISTING 🔥\n\nFOR SALE: {description}\n\nInterested? Contact us through WhatsApp! #Cashify #MarketplaceAlternative"
+                
+                # Prepare detailed captions for different platforms
+                base_caption = f"FOR SALE: {description}\n\n"
+                base_caption += f"📋 Category: {category}\n"
+                base_caption += f"🔍 Condition: {condition}\n"
+                base_caption += f"💰 Price: {selling_price}\n"
+                base_caption += f"📍 Location: {location}\n"
+                base_caption += f"📞 Contact: {contact}\n\n"
+                
+                insta_caption = base_caption + "Contact us to purchase this item! #Cashify #ForSale"
+                story_caption = f"NEW ITEM: {description} - {selling_price}"
+                fb_caption = "🔥 NEW LISTING 🔥\n\n" + base_caption + "Interested? Contact us through WhatsApp! #Cashify #MarketplaceAlternative"
                 
                 # Try posting to each platform
                 try:
@@ -324,13 +496,20 @@ def whatsapp_webhook():
             session["state"] = "INIT"
             session.pop("image", None)
             session.pop("description", None)
+            session.pop("category", None)
+            session.pop("condition", None)
+            session.pop("buying_price", None)
+            session.pop("selling_price", None)
+            session.pop("reason_for_selling", None)
+            session.pop("location", None)
+            session.pop("contact", None)
             session.pop("payment_amount", None)
             session.pop("transaction_id", None)
             session.pop("product_id", None)
             set_session(from_number, session)
 
         else:
-            response.message("I didn't catch that. Please send me a text description for your item.")
+            response.message("I didn't catch that. Please provide your contact information.")
     
     elif state == "PAYMENT_INITIATED":
         response.message("We're still waiting for your payment confirmation. Please complete the M-Pesa prompt on your phone.")
@@ -393,6 +572,11 @@ def mpesa_callback():
                         # Get item details for social media posting
                         image_url = session.get("image")
                         description = session.get("description")
+                        category = session.get("category", "")
+                        condition = session.get("condition", "")
+                        selling_price = session.get("selling_price", "")
+                        location = session.get("location", "")
+                        contact = session.get("contact", "")
                         
                         # Create a list to track where posting succeeded
                         posting_results = []
@@ -400,10 +584,18 @@ def mpesa_callback():
                         # Try to post to social media platforms if we have the necessary info
                         if image_url and description:
                             current_app.logger.info("Posting to social media...")
-                            # Prepare captions for different platforms
-                            insta_caption = f"FOR SALE: {description}\n\nContact us to purchase this item! #Cashify #ForSale"
-                            story_caption = f"NEW ITEM: {description}"
-                            fb_caption = f"🔥 NEW LISTING 🔥\n\nFOR SALE: {description}\n\nInterested? Contact us through WhatsApp! #Cashify #MarketplaceAlternative"
+                            
+                            # Prepare detailed captions for different platforms
+                            base_caption = f"FOR SALE: {description}\n\n"
+                            base_caption += f"📋 Category: {category}\n"
+                            base_caption += f"🔍 Condition: {condition}\n"
+                            base_caption += f"💰 Price: {selling_price}\n"
+                            base_caption += f"📍 Location: {location}\n"
+                            base_caption += f"📞 Contact: {contact}\n\n"
+                            
+                            insta_caption = base_caption + "Contact us to purchase this item! #Cashify #ForSale"
+                            story_caption = f"NEW ITEM: {description} - {selling_price}"
+                            fb_caption = "🔥 NEW LISTING 🔥\n\n" + base_caption + "Interested? Contact us through WhatsApp! #Cashify #MarketplaceAlternative"
                             
                             # Try posting to each platform
                             try:
@@ -457,6 +649,13 @@ def mpesa_callback():
                     session["state"] = "INIT"
                     session.pop("image", None)
                     session.pop("description", None)
+                    session.pop("category", None)
+                    session.pop("condition", None)
+                    session.pop("buying_price", None)
+                    session.pop("selling_price", None)
+                    session.pop("reason_for_selling", None)
+                    session.pop("location", None)
+                    session.pop("contact", None)
                     session.pop("payment_amount", None)
                     session.pop("transaction_id", None)
                     session.pop("product_id", None)
@@ -470,3 +669,4 @@ def mpesa_callback():
 
 if __name__ == "__main__":
     app.run(debug=True)
+    
