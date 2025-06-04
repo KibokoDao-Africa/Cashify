@@ -140,6 +140,66 @@ def save_product(user_number, image_url, description, category, condition, buyin
     current_app.logger.info(f"Product saved with ID: {result.inserted_id}")
     return str(result.inserted_id)
 
+def process_social_media_uploads(user_number, image_url, description, category, condition, selling_price, location, contact):
+    """
+    Process social media uploads in a background thread and send a follow-up message when complete
+    """
+    try:
+        # Create a list to track where posting succeeded
+        posting_results = []
+        
+        # Prepare detailed captions for different platforms
+        base_caption = f"FOR SALE: {description}\n\n"
+        base_caption += f"📋 Category: {category}\n"
+        base_caption += f"🔍 Condition: {condition}\n"
+        base_caption += f"💰 Price: {selling_price}\n"
+        base_caption += f"📍 Location: {location}\n"
+        base_caption += f"📞 Contact: {contact}\n\n"
+        
+        insta_caption = base_caption + "Contact us to purchase this item! #Cashify #ForSale"
+        story_caption = f"NEW ITEM: {description} - {selling_price}"
+        fb_caption = "🔥 NEW LISTING 🔥\n\n" + base_caption + "Interested? Contact us through WhatsApp! #Cashify #MarketplaceAlternative"
+        
+        # Try posting to each platform
+        try:
+            link = upload_to_facebook(image_url, fb_caption)
+            posting_results.append("Facebook post created with link: " + link)
+        except Exception as e:
+            posting_results.append(f"Error posting to Facebook: {str(e)}")
+
+        try:
+            id = upload_to_instagram(image_url, insta_caption)
+            posting_results.append("Instagram post created with ID: " + id)
+        except Exception as e:
+            posting_results.append(f"Error posting to Instagram: {str(e)}")
+            
+        try:
+            id = upload_to_instagram(image_url, story_caption, story=True)
+            posting_results.append("Instagram story created with ID: " + id)
+        except Exception as e:
+            posting_results.append(f"Error posting to Instagram: {str(e)}")
+
+        # Send follow-up message with results
+        follow_up_message = "✅ Social Media Upload Results:\n\n"
+        follow_up_message += "\n".join(posting_results)
+        follow_up_message += "\n\nThank you for using Cashify!"
+        
+        # Send the follow-up message using Twilio
+        client = Client(os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
+        twilio_number = os.getenv('TWILIO_WHATSAPP_NUMBER')
+        if not twilio_number.startswith('whatsapp:'):
+            twilio_number = f"whatsapp:{twilio_number}"
+            
+        client.messages.create(
+            body=follow_up_message,
+            from_=twilio_number,
+            to=user_number
+        )
+        
+    except Exception as e:
+        # Log any errors
+        print(f"Error in background processing: {str(e)}")
+
 @app.route("/products", methods=["POST"])
 def create_product():
     """
@@ -599,9 +659,10 @@ def whatsapp_webhook():
             #     session.pop("transaction_id", None)
             #     set_session(from_number, session)
 
-            message_body = "Payment received!\n\n"
-                    
-            # Get item details for social media posting
+            # Immediately respond with a message that uploads are in progress
+            response.message("Payment received! Your product is now listed. We're uploading your item to social media platforms - you'll receive the results shortly.")
+
+            # Start a background thread to process uploads
             image_url = session.get("image")
             description = session.get("description")
             category = session.get("category", "")
@@ -610,53 +671,14 @@ def whatsapp_webhook():
             location = session.get("location", "")
             contact = session.get("contact", "")
             
-            # Create a list to track where posting succeeded
-            posting_results = []
-            
-            # Try to post to social media platforms if we have the necessary info
-            if image_url and description:
-                current_app.logger.info("Posting to social media...")
-                
-                # Prepare detailed captions for different platforms
-                base_caption = f"FOR SALE: {description}\n\n"
-                base_caption += f"📋 Category: {category}\n"
-                base_caption += f"🔍 Condition: {condition}\n"
-                base_caption += f"💰 Price: {selling_price}\n"
-                base_caption += f"📍 Location: {location}\n"
-                base_caption += f"📞 Contact: {contact}\n\n"
-                
-                insta_caption = base_caption + "Contact us to purchase this item! #Cashify #ForSale"
-                story_caption = f"NEW ITEM: {description} - {selling_price}"
-                fb_caption = "🔥 NEW LISTING 🔥\n\n" + base_caption + "Interested? Contact us through WhatsApp! #Cashify #MarketplaceAlternative"
-                
-                # Try posting to each platform
-                try:
-                    link = upload_to_facebook(image_url, fb_caption)
-                    posting_results.append("Facebook post created with link: " + link)
-                except Exception as e:
-                    posting_results.append(f"Error posting to Facebook: {str(e)}")
-
-                try:
-                    id = upload_to_instagram(image_url, insta_caption)
-                    posting_results.append("Instagram post created with ID: " + id)
-                except Exception as e:
-                    posting_results.append(f"Error posting to Instagram: {str(e)}")
-                    
-                try:
-                    id = upload_to_instagram(image_url, story_caption, story=True)
-                    posting_results.append("Instagram story created with ID: " + id)
-                except Exception as e:
-                    posting_results.append(f"Error posting to Instagram: {str(e)}")
-
-                posting_results = "\n".join(posting_results)
-                current_app.logger.info(f"Social media posting results: {posting_results}")
-            
-            # Custom message based on posting results
-            message_body += posting_results
-                
-            message_body += "\n\nThank you for using Cashify!"
-
-            response.message(message_body)
+            # Start background thread for social media uploads
+            upload_thread = threading.Thread(
+                target=process_social_media_uploads,
+                args=(from_number, image_url, description, category, condition, 
+                      selling_price, location, contact)
+            )
+            upload_thread.daemon = True
+            upload_thread.start()
 
             # reset session
             session["state"] = "INIT"
@@ -731,11 +753,25 @@ def mpesa_callback():
                     # Get user session
                     session = get_session(whatsapp_number)
 
-                    message_body = "Payment received!\n\n"
-                    
                     # Check if this user is awaiting payment confirmation
                     if session.get('state') == "PAYMENT_INITIATED":
-                        # Get item details for social media posting
+                        # Send initial confirmation message to the user
+                        client = Client(os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
+
+                        # Get the Twilio number and ensure it has the whatsapp: prefix
+                        twilio_number = os.getenv('TWILIO_WHATSAPP_NUMBER')
+                        if not twilio_number.startswith('whatsapp:'):
+                            twilio_number = f"whatsapp:{twilio_number}"
+
+                        initial_message = "Payment received! Your product is now listed. We're uploading your item to social media platforms - you'll receive the results shortly."
+                        
+                        client.messages.create(
+                            body=initial_message,
+                            from_=twilio_number,
+                            to=whatsapp_number
+                        )
+
+                        # Start background thread for uploads
                         image_url = session.get("image")
                         description = session.get("description")
                         category = session.get("category", "")
@@ -744,88 +780,29 @@ def mpesa_callback():
                         location = session.get("location", "")
                         contact = session.get("contact", "")
                         
-                        # Create a list to track where posting succeeded
-                        posting_results = []
+                        upload_thread = threading.Thread(
+                            target=process_social_media_uploads,
+                            args=(whatsapp_number, image_url, description, category, condition, 
+                                selling_price, location, contact)
+                        )
+                        upload_thread.daemon = True
+                        upload_thread.start()
                         
-                        # Try to post to social media platforms if we have the necessary info
-                        if image_url and description:
-                            current_app.logger.info("Posting to social media...")
-                            
-                            # Prepare detailed captions for different platforms
-                            base_caption = f"FOR SALE: {description}\n\n"
-                            base_caption += f"📋 Category: {category}\n"
-                            base_caption += f"🔍 Condition: {condition}\n"
-                            base_caption += f"💰 Price: {selling_price}\n"
-                            base_caption += f"📍 Location: {location}\n"
-                            base_caption += f"📞 Contact: {contact}\n\n"
-                            
-                            insta_caption = base_caption + "Contact us to purchase this item! #Cashify #ForSale"
-                            story_caption = f"NEW ITEM: {description} - {selling_price}"
-                            fb_caption = "🔥 NEW LISTING 🔥\n\n" + base_caption + "Interested? Contact us through WhatsApp! #Cashify #MarketplaceAlternative"
-                            
-                            # Try posting to each platform
-                            try:
-                                link = upload_to_facebook(image_url, fb_caption)
-                                posting_results.append("Facebook post created with link: " + link)
-                            except Exception as e:
-                                posting_results.append(f"Error posting to Facebook: {str(e)}")
-
-                            try:
-                                id = upload_to_instagram(image_url, insta_caption)
-                                posting_results.append("Instagram post created with ID: " + id)
-                            except Exception as e:
-                                posting_results.append(f"Error posting to Instagram: {str(e)}")
-
-                            try:
-                                id = upload_to_instagram(image_url, story_caption, story=True)
-                                posting_results.append("Instagram story created with ID: " + id)
-                            except Exception as e:
-                                posting_results.append(f"Error posting to Instagram: {str(e)}")
-
-                            posting_results = "\n".join(posting_results)
-                            current_app.logger.info(f"Social media posting results: {posting_results}")
-                        
-                        # Save the updated session
+                        # reset session
+                        session["state"] = "INIT"
+                        session.pop("image", None)
+                        session.pop("description", None)
+                        session.pop("category", None)
+                        session.pop("condition", None)
+                        session.pop("buying_price", None)
+                        session.pop("selling_price", None)
+                        session.pop("reason_for_selling", None)
+                        session.pop("location", None)
+                        session.pop("contact", None)
+                        session.pop("payment_amount", None)
+                        session.pop("transaction_id", None)
+                        session.pop("product_id", None)
                         set_session(whatsapp_number, session)
-                        
-                        # Custom message based on posting results
-                        message_body += posting_results
-                        
-                    message_body += "\n\nThank you for using Cashify!"
-
-                    # Send confirmation message to the user
-                    client = Client(os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
-
-                    # Get the Twilio number and ensure it has the whatsapp: prefix
-                    twilio_number = os.getenv('TWILIO_WHATSAPP_NUMBER')
-                    if not twilio_number.startswith('whatsapp:'):
-                        twilio_number = f"whatsapp:{twilio_number}"
-
-                    current_app.logger.info(f"Sending message to {whatsapp_number}: {message_body}")
-
-                    message = client.messages.create(
-                        body=message_body,
-                        from_=twilio_number,
-                        to=whatsapp_number
-                    )
-
-                    current_app.logger.info(f"Message sent with SID: {message.sid}")
-
-                    # reset session
-                    session["state"] = "INIT"
-                    session.pop("image", None)
-                    session.pop("description", None)
-                    session.pop("category", None)
-                    session.pop("condition", None)
-                    session.pop("buying_price", None)
-                    session.pop("selling_price", None)
-                    session.pop("reason_for_selling", None)
-                    session.pop("location", None)
-                    session.pop("contact", None)
-                    session.pop("payment_amount", None)
-                    session.pop("transaction_id", None)
-                    session.pop("product_id", None)
-                    set_session(whatsapp_number, session)
     
     # Always return a success response to M-Pesa
     return {
