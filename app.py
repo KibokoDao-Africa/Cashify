@@ -140,6 +140,55 @@ def save_product(user_number, image_url, description, category, condition, buyin
     current_app.logger.info(f"Product saved with ID: {result.inserted_id}")
     return str(result.inserted_id)
 
+@app.route("/products", methods=["POST"])
+def create_product():
+    """
+    Endpoint to create a new product listing
+    """
+    try:
+        data = request.json
+        
+        # Validate required fields
+        required_fields = ["user_number", "image_url", "description", "category", 
+                           "condition", "buying_price", "selling_price", 
+                           "reason_for_selling", "location", "contact"]
+        
+        for field in required_fields:
+            if field not in data:
+                return jsonify({
+                    "success": False,
+                    "error": f"Missing required field: {field}"
+                }), 400
+        
+        # Save the product to the database
+        product_id = save_product(
+            user_number=data["user_number"],
+            image_url=data["image_url"],
+            description=data["description"],
+            category=data["category"],
+            condition=data["condition"],
+            buying_price=data["buying_price"],
+            selling_price=data["selling_price"],
+            reason_for_selling=data["reason_for_selling"],
+            location=data["location"],
+            contact=data["contact"]
+        )
+        
+        return jsonify({
+            "success": True,
+            "data": {
+                "id": product_id,
+                "message": "Product created successfully"
+            }
+        }), 201
+        
+    except Exception as e:
+        current_app.logger.error(f"Error creating product: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to create product"
+        }), 500
+
 @app.route("/products", methods=["GET"])
 def get_all_products():
     """
@@ -786,4 +835,3 @@ def mpesa_callback():
 
 if __name__ == "__main__":
     app.run(debug=True)
-    
