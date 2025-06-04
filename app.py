@@ -7,6 +7,8 @@ import requests
 import time
 import uuid
 import json
+import boto3
+from io import BytesIO
 from datetime import datetime
 from payment import initiate_payment
 from facebook_graph_api import upload_to_facebook, upload_to_instagram
@@ -18,6 +20,40 @@ mongo_client = MongoClient(os.getenv("MONGODB_URI", "mongodb://localhost:27017/"
 db = mongo_client[os.getenv("MONGODB_DATABASE", "cashify")]
 sessions_collection = db.sessions
 products_collection = db.products
+
+# AWS S3 Configuration
+s3_client = boto3.client(
+    's3',
+    aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+    aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+    region_name=os.getenv('AWS_REGION', 'us-east-1')
+)
+S3_BUCKET = os.getenv('S3_BUCKET_NAME')
+
+def upload_to_s3(file_content, filename, content_type='image/jpeg'):
+    """
+    Upload a file to S3 bucket and return the public URL
+    """
+    try:
+        # Upload the file to S3
+        s3_client.upload_fileobj(
+            BytesIO(file_content),
+            S3_BUCKET,
+            filename,
+            ExtraArgs={
+                'ContentType': content_type,
+                'ACL': 'public-read'  # Make the file publicly accessible
+            }
+        )
+        
+        # Generate the URL for the uploaded file
+        s3_url = f"https://{S3_BUCKET}.s3.amazonaws.com/{filename}"
+        current_app.logger.info(f"File uploaded to S3: {s3_url}")
+        return s3_url
+    
+    except Exception as e:
+        current_app.logger.error(f"Error uploading to S3: {str(e)}")
+        raise
 
 def get_session(user_number):
     """
@@ -228,20 +264,17 @@ def whatsapp_webhook():
                     response.message("Sorry, I couldn't download your image. Please try again.")
                     return str(response)
                 
-                # Create uploads directory if it doesn't exist
-                os.makedirs(os.path.join("static", "uploads"), exist_ok=True)
-                
-                # Generate a unique filename
+                # Generate a unique filename for S3
                 filename = f"cashify_feed_{uuid.uuid4()}.jpg"
-                file_path = os.path.join("static", "uploads", filename)
                 
-                # Save the image locally
-                with open(file_path, "wb") as f:
-                    f.write(image_response.content)
+                # Upload the image to S3 bucket
+                public_image_url = upload_to_s3(
+                    image_response.content, 
+                    filename, 
+                    content_type=image_response.headers.get('Content-Type', 'image/jpeg')
+                )
                 
-                # Create a publicly accessible URL
-                public_image_url = f"{os.getenv('BASE_URL')}/static/uploads/{filename}"
-                current_app.logger.info(f"Media saved locally. Public URL: {public_image_url}")
+                current_app.logger.info(f"Media uploaded to S3. Public URL: {public_image_url}")
                 
                 session["image"] = public_image_url
                 session["state"] = "AWAITING_DESCRIPTION"
@@ -669,4 +702,3 @@ def mpesa_callback():
 
 if __name__ == "__main__":
     app.run(debug=True)
-    
