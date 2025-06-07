@@ -1,3 +1,7 @@
+# nuke the cache to force a rebuild of the image
+# this is useful when you change the requirements.txt file
+ARG CACHEBUST=1
+
 # use this image as the base
 FROM python:3.13-slim
 
