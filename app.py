@@ -43,8 +43,7 @@ def upload_to_s3(file_content, filename, content_type='image/jpeg'):
             S3_BUCKET,
             filename,
             ExtraArgs={
-                'ContentType': content_type,
-                'ACL': 'public-read'  # Make the file publicly accessible
+                'ContentType': content_type
             }
         )
         
