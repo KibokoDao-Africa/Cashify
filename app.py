@@ -8,7 +8,7 @@ import uuid
 import boto3
 import threading
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timedelta
 from pesapal import initiate_payment, check_payment_status
 from facebook_graph_api import upload_to_facebook, upload_to_instagram
 from bson import ObjectId
@@ -82,15 +82,23 @@ def set_session(user_number, session):
         upsert=True
     )
 
-def get_user_products(user_number):
+def get_user_products(user_number, min_age_days=0):
     """
     Get all active products for a given user
+    If min_age_days is specified, only return products older than that many days
     """
-    products = products_collection.find({
+    query = {
         "user_number": user_number,
         "status": "active",
         "sold": False
-    }).sort("created_at", -1)
+    }
+    
+    # Add date filter if min_age_days is specified
+    if min_age_days > 0:
+        cutoff_date = datetime.utcnow() - timedelta(days=min_age_days)
+        query["created_at"] = {"$lte": cutoff_date}
+    
+    products = products_collection.find(query).sort("created_at", -1)
     
     result = []
     for product in products:
@@ -394,9 +402,9 @@ def whatsapp_webhook():
         session.pop("transaction_id", None)
         session.pop("products", None)
         
-        # Check if user has active products before mentioning SOLD option
-        products = get_user_products(from_number)
-        if products:
+        # Check if user has products older than 7 days before mentioning SOLD option
+        old_products = get_user_products(from_number, min_age_days=7)
+        if old_products:
             response.message("Welcome to Cashify! Please send me up to 3 images or 1 video to post a new item for sale, or type SOLD to mark one of your items as sold.")
         else:
             response.message("Welcome to Cashify! Please send me up to 3 images or 1 video to post a new item for sale.")
@@ -410,15 +418,15 @@ def whatsapp_webhook():
 
     if state == "INIT":
         if incoming_text.upper() == "SOLD":
-            # User wants to mark a product as sold
-            products = get_user_products(from_number)
+            # User wants to mark a product as sold - only show products 7+ days old
+            products = get_user_products(from_number, min_age_days=7)
             
             if not products:
-                response.message("You don't have any active products to mark as sold.")
+                response.message("You don't have any products that are at least 7 days old available to mark as sold.")
                 return str(response)
             
             # Create a list of products for the user to choose from
-            product_list = "Your active products:\n\n"
+            product_list = "Your products (7+ days old) available to mark as sold:\n\n"
             for i, product in enumerate(products):
                 product_list += f"{i+1}. {product['description']} - ${product['selling_price']}\n"
             
@@ -515,9 +523,9 @@ def whatsapp_webhook():
                 session["state"] = "AWAITING_MORE_MEDIA"
                 set_session(from_number, session)
         else:
-            # Check if user has products before mentioning SOLD option
-            products = get_user_products(from_number)
-            if products:
+            # Check if user has products older than 7 days before mentioning SOLD option
+            old_products = get_user_products(from_number, min_age_days=7)
+            if old_products:
                 response.message("Hi! Send me up to 3 images or 1 video to post a new item for sale, or type SOLD to mark one of your items as sold.")
             else:
                 response.message("Hi! Send me up to 3 images or 1 video to post a new item for sale.")
