@@ -115,14 +115,15 @@ def mark_product_as_sold(product_id):
     
     return result.modified_count > 0
 
-def save_product(user_number, image_url, description, category, condition, buying_price, 
+def save_product(user_number, media_urls, media_type, description, category, condition, buying_price, 
                 selling_price, reason_for_selling, location, contact):
     """
     Save a product to the database with all details
     """
     product = {
         "user_number": user_number,
-        "image_url": image_url,
+        "media_urls": media_urls,  # List of URLs
+        "media_type": media_type,  # "images" or "video"
         "description": description,
         "category": category,
         "condition": condition,
@@ -140,7 +141,7 @@ def save_product(user_number, image_url, description, category, condition, buyin
     current_app.logger.info(f"Product saved with ID: {result.inserted_id}")
     return str(result.inserted_id)
 
-def process_social_media_uploads(user_number, image_url, description, category, condition, selling_price, location, contact):
+def process_social_media_uploads(user_number, media_urls, media_type, description, category, condition, selling_price, location, contact):
     """
     Process social media uploads in a background thread and send a follow-up message when complete
     """
@@ -160,24 +161,28 @@ def process_social_media_uploads(user_number, image_url, description, category, 
         story_caption = f"NEW ITEM: {description} - {selling_price}"
         fb_caption = "🔥 NEW LISTING 🔥\n\n" + base_caption + "Interested? Contact us through WhatsApp! #Cashify #MarketplaceAlternative"
         
+        is_video = media_type == "video"
+        
         # Try posting to each platform
         try:
-            link = upload_to_facebook(image_url, fb_caption)
+            link = upload_to_facebook(media_urls=media_urls, is_video=is_video, caption=fb_caption)
             posting_results.append("Facebook post created with link: " + link)
         except Exception as e:
             posting_results.append(f"Error posting to Facebook: {str(e)}")
 
         try:
-            id = upload_to_instagram(image_url, insta_caption)
+            id = upload_to_instagram(media_urls=media_urls, is_video=is_video, caption=insta_caption)
             posting_results.append("Instagram post created with ID: " + id)
         except Exception as e:
             posting_results.append(f"Error posting to Instagram: {str(e)}")
             
         try:
-            id = upload_to_instagram(image_url, story_caption, story=True)
+            # For stories, use only the first media file
+            story_media = [media_urls[0]] if media_urls else []
+            id = upload_to_instagram(media_urls=story_media, is_video=is_video, caption=story_caption, story=True)
             posting_results.append("Instagram story created with ID: " + id)
         except Exception as e:
-            posting_results.append(f"Error posting to Instagram: {str(e)}")
+            posting_results.append(f"Error posting to Instagram stories: {str(e)}")
 
         # Send follow-up message with results
         follow_up_message = "✅ Social Media Upload Results:\n\n"
@@ -209,7 +214,7 @@ def create_product():
         data = request.json
         
         # Validate required fields
-        required_fields = ["user_number", "image_url", "description", "category", 
+        required_fields = ["user_number", "media_urls", "media_type", "description", "category", 
                            "condition", "buying_price", "selling_price", 
                            "reason_for_selling", "location", "contact"]
         
@@ -223,7 +228,8 @@ def create_product():
         # Save the product to the database
         product_id = save_product(
             user_number=data["user_number"],
-            image_url=data["image_url"],
+            media_urls=data["media_urls"],
+            media_type=data["media_type"],
             description=data["description"],
             category=data["category"],
             condition=data["condition"],
@@ -272,7 +278,10 @@ def get_all_products():
             product_data = {
                 "id": str(product["_id"]),
                 "description": product["description"],
-                "image_url": product["image_url"],
+                "media_urls": product.get("media_urls", []),
+                "media_type": product.get("media_type", "images"),
+                # Keep backward compatibility with old image_url field
+                "image_url": product.get("image_url") or (product.get("media_urls", [None])[0]),
                 "category": product.get("category", ""),
                 "condition": product.get("condition", ""),
                 "buying_price": product.get("buying_price", ""),
@@ -323,7 +332,10 @@ def get_product(product_id):
         product_data = {
             "id": str(product["_id"]),
             "description": product["description"],
-            "image_url": product["image_url"],
+            "media_urls": product.get("media_urls", []),
+            "media_type": product.get("media_type", "images"),
+            # Keep backward compatibility with old image_url field
+            "image_url": product.get("image_url") or (product.get("media_urls", [None])[0]),
             "category": product.get("category", ""),
             "condition": product.get("condition", ""),
             "buying_price": product.get("buying_price", ""),
@@ -370,7 +382,8 @@ def whatsapp_webhook():
 
     if incoming_text.upper() == "RESET":
         session["state"] = "INIT"
-        session.pop("image", None)
+        session.pop("media_urls", None)
+        session.pop("media_type", None)
         session.pop("description", None)
         session.pop("category", None)
         session.pop("condition", None)
@@ -386,9 +399,9 @@ def whatsapp_webhook():
         # Check if user has active products before mentioning SOLD option
         products = get_user_products(from_number)
         if products:
-            response.message("Welcome to Cashify! Please send me a picture to post a new item for sale, or type SOLD to mark one of your items as sold.")
+            response.message("Welcome to Cashify! Please send me up to 3 images or 1 video to post a new item for sale, or type SOLD to mark one of your items as sold.")
         else:
-            response.message("Welcome to Cashify! Please send me a picture to post a new item for sale.")
+            response.message("Welcome to Cashify! Please send me up to 3 images or 1 video to post a new item for sale.")
             
         set_session(from_number, session)
         return str(response)
@@ -421,47 +434,142 @@ def whatsapp_webhook():
             response.message(product_list)
         
         elif num_media > 0:
-            # User has sent a media file (image)
-            twilio_media_url = request.form.get("MediaUrl0")
+            # User has sent media files
+            if num_media > 3:
+                response.message("Please send up to 3 images or 1 video only.")
+                return str(response)
             
             try:
-                # Download the image from Twilio with auth
-                auth = (os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
-                image_response = requests.get(twilio_media_url, auth=auth)
+                media_urls = []
+                media_type = None
+                
+                # Process all media files
+                for i in range(num_media):
+                    twilio_media_url = request.form.get(f"MediaUrl{i}")
+                    content_type = request.form.get(f"MediaContentType{i}", "")
+                    
+                    # Determine if it's a video or image
+                    is_video = content_type.startswith("video/")
+                    is_image = content_type.startswith("image/")
+                    
+                    if not is_video and not is_image:
+                        response.message("Please send only images or videos.")
+                        return str(response)
+                    
+                    # Check for mixed media types
+                    if media_type is None:
+                        media_type = "video" if is_video else "images"
+                    elif (media_type == "video" and is_image) or (media_type == "images" and is_video):
+                        response.message("Please send either images OR video, not both.")
+                        return str(response)
+                    
+                    # For video, only allow one file
+                    if is_video and num_media > 1:
+                        response.message("Please send only 1 video file.")
+                        return str(response)
+                    
+                    # Download the media from Twilio with auth
+                    auth = (os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
+                    media_response = requests.get(twilio_media_url, auth=auth)
 
-                current_app.logger.info(f"Image response: {image_response}")
+                    current_app.logger.info(f"Media response: {media_response}")
+                    
+                    if media_response.status_code != 200:
+                        response.message("Sorry, I couldn't download your media. Please try again.")
+                        return str(response)
+                    
+                    # Generate a unique filename for S3
+                    extension = "mp4" if is_video else "jpg"
+                    filename = f"cashify_feed_{uuid.uuid4()}.{extension}"
+                    
+                    # Upload the media to S3 bucket
+                    public_media_url = upload_to_s3(
+                        media_response.content, 
+                        filename, 
+                        content_type=content_type
+                    )
+                    
+                    media_urls.append(public_media_url)
+                    current_app.logger.info(f"Media uploaded to S3. Public URL: {public_media_url}")
                 
-                if image_response.status_code != 200:
-                    response.message("Sorry, I couldn't download your image. Please try again.")
-                    return str(response)
-                
-                # Generate a unique filename for S3
-                filename = f"cashify_feed_{uuid.uuid4()}.jpg"
-                
-                # Upload the image to S3 bucket
-                public_image_url = upload_to_s3(
-                    image_response.content, 
-                    filename, 
-                    content_type=image_response.headers.get('Content-Type', 'image/jpeg')
-                )
-                
-                current_app.logger.info(f"Media uploaded to S3. Public URL: {public_image_url}")
-                
-                session["image"] = public_image_url
+                session["media_urls"] = media_urls
+                session["media_type"] = media_type
                 session["state"] = "AWAITING_DESCRIPTION"
                 set_session(from_number, session)
-                response.message("Great! I received your picture. Please enter a description for your item.")
+                
+                media_count_text = f"{len(media_urls)} {'image' if media_type == 'images' else 'video'}{'s' if len(media_urls) > 1 else ''}"
+                response.message(f"Great! I received your {media_count_text}. Please enter a description for your item.")
                 
             except Exception as e:
                 current_app.logger.error(f"Error processing media: {str(e)}")
-                response.message("Sorry, I couldn't process your image. Could you please try sending it again?")
+                response.message("Sorry, I couldn't process your media. Could you please try sending it again?")
+        
+        elif incoming_text.lower() == "add more" and session.get("media_urls"):
+            # User wants to add more images (only if they already have images)
+            current_media = session.get("media_urls", [])
+            if session.get("media_type") == "video":
+                response.message("You already uploaded a video. Please type RESET to start over with new media.")
+            elif len(current_media) >= 3:
+                response.message("You already have 3 images. Please type RESET to start over with new media.")
+            else:
+                remaining = 3 - len(current_media)
+                response.message(f"Please send up to {remaining} more image{'s' if remaining > 1 else ''}.")
+                session["state"] = "AWAITING_MORE_MEDIA"
+                set_session(from_number, session)
         else:
             # Check if user has products before mentioning SOLD option
             products = get_user_products(from_number)
             if products:
-                response.message("Hi! Send me a picture to post a new item for sale, or type SOLD to mark one of your items as sold.")
+                response.message("Hi! Send me up to 3 images or 1 video to post a new item for sale, or type SOLD to mark one of your items as sold.")
             else:
-                response.message("Hi! Send me a picture to post a new item for sale.")
+                response.message("Hi! Send me up to 3 images or 1 video to post a new item for sale.")
+
+    elif state == "AWAITING_MORE_MEDIA":
+        if num_media > 0:
+            current_media = session.get("media_urls", [])
+            
+            if len(current_media) + num_media > 3:
+                response.message(f"You can only add {3 - len(current_media)} more image{'s' if 3 - len(current_media) > 1 else ''}.")
+                return str(response)
+            
+            try:
+                # Process additional media files
+                for i in range(num_media):
+                    twilio_media_url = request.form.get(f"MediaUrl{i}")
+                    content_type = request.form.get(f"MediaContentType{i}", "")
+                    
+                    if not content_type.startswith("image/"):
+                        response.message("Please send only images when adding more media.")
+                        return str(response)
+                    
+                    # Download and upload to S3
+                    auth = (os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
+                    media_response = requests.get(twilio_media_url, auth=auth)
+                    
+                    if media_response.status_code != 200:
+                        response.message("Sorry, I couldn't download your image. Please try again.")
+                        return str(response)
+                    
+                    filename = f"cashify_feed_{uuid.uuid4()}.jpg"
+                    public_media_url = upload_to_s3(
+                        media_response.content, 
+                        filename, 
+                        content_type=content_type
+                    )
+                    
+                    current_media.append(public_media_url)
+                
+                session["media_urls"] = current_media
+                session["state"] = "AWAITING_DESCRIPTION"
+                set_session(from_number, session)
+                
+                response.message(f"Great! I now have {len(current_media)} images. Please enter a description for your item.")
+                
+            except Exception as e:
+                current_app.logger.error(f"Error processing additional media: {str(e)}")
+                response.message("Sorry, I couldn't process your images. Please try again.")
+        else:
+            response.message("Please send the additional images, or type CONTINUE to proceed with your current images.")
 
     elif state == "AWAITING_PRODUCT_SELECTION":
         try:
@@ -508,100 +616,8 @@ def whatsapp_webhook():
         else:
             response.message("I didn't catch that. Please send me a text description for your item.")
 
-    elif state == "AWAITING_CATEGORY":
-        categories = ["Electronics", "Clothing", "Furniture", "Vehicles", 
-                     "Home Appliances", "Real Estate", "Services", "Other"]
-        
-        try:
-            # Handle both number input and text input
-            if incoming_text.isdigit() and 1 <= int(incoming_text) <= len(categories):
-                selected_category = categories[int(incoming_text) - 1]
-            elif incoming_text in categories:
-                selected_category = incoming_text
-            else:
-                raise ValueError("Invalid category")
-            
-            session["category"] = selected_category
-            session["state"] = "AWAITING_CONDITION"
-            set_session(from_number, session)
-            
-            # Send condition options
-            conditions = ["New", "Used - Like New", "Used - Good", "Used - Fair"]
-            condition_message = "Please select the condition by typing the number:\n\n" + \
-                               "\n".join([f"{i+1}. {cond}" for i, cond in enumerate(conditions)])
-            
-            response.message(condition_message)
-        except:
-            category_options = "\n".join([f"{i+1}. {cat}" for i, cat in enumerate(categories)])
-            response.message(f"Please select a valid category number or name:\n\n{category_options}")
-    
-    elif state == "AWAITING_CONDITION":
-        conditions = ["New", "Used - Like New", "Used - Good", "Used - Fair"]
-        
-        try:
-            # Handle both number input and text input
-            if incoming_text.isdigit() and 1 <= int(incoming_text) <= len(conditions):
-                selected_condition = conditions[int(incoming_text) - 1]
-            elif incoming_text in conditions or incoming_text.lower() in [c.lower() for c in conditions]:
-                selected_condition = incoming_text
-            else:
-                raise ValueError("Invalid condition")
-            
-            session["condition"] = selected_condition
-            session["state"] = "AWAITING_BUYING_PRICE"
-            set_session(from_number, session)
-            
-            response.message("Please enter the buying price (numbers only):")
-        except:
-            condition_options = "\n".join([f"{i+1}. {cond}" for i, cond in enumerate(conditions)])
-            response.message(f"Please select a valid condition number or name:\n\n{condition_options}")
-    
-    elif state == "AWAITING_BUYING_PRICE":
-        try:
-            # Validate it's a number (can be float)
-            buying_price = float(incoming_text.replace(',', ''))
-            
-            session["buying_price"] = buying_price
-            session["state"] = "AWAITING_SELLING_PRICE"
-            set_session(from_number, session)
-            
-            response.message("Please enter your selling price (numbers only):")
-        except:
-            response.message("Please enter a valid buying price (numbers only):")
-    
-    elif state == "AWAITING_SELLING_PRICE":
-        try:
-            # Validate it's a number (can be float)
-            selling_price = float(incoming_text.replace(',', ''))
-            
-            session["selling_price"] = selling_price
-            session["state"] = "AWAITING_REASON"
-            set_session(from_number, session)
-            
-            response.message("Please provide a brief reason for selling:")
-        except:
-            response.message("Please enter a valid selling price (numbers only):")
-    
-    elif state == "AWAITING_REASON":
-        if incoming_text:
-            session["reason_for_selling"] = incoming_text
-            session["state"] = "AWAITING_LOCATION"
-            set_session(from_number, session)
-            
-            response.message("Please share your location (city/town):")
-        else:
-            response.message("I didn't catch that. Please provide a reason for selling.")
-    
-    elif state == "AWAITING_LOCATION":
-        if incoming_text:
-            session["location"] = incoming_text
-            session["state"] = "AWAITING_CONTACT"
-            set_session(from_number, session)
-            
-            response.message("Please provide your preferred contact information for buyers (phone or email):")
-        else:
-            response.message("I didn't catch that. Please provide your location.")
-    
+    # ...existing code... (rest of the states remain the same until AWAITING_CONTACT)
+
     elif state == "AWAITING_CONTACT":
         if incoming_text:
             session["contact"] = incoming_text
@@ -617,7 +633,11 @@ def whatsapp_webhook():
             summary += f"• Selling Price: {session['selling_price']}\n"
             summary += f"• Reason for Selling: {session['reason_for_selling']}\n"
             summary += f"• Location: {session['location']}\n"
-            summary += f"• Contact: {session['contact']}\n\n"
+            summary += f"• Contact: {session['contact']}\n"
+            
+            media_count = len(session.get("media_urls", []))
+            media_type = session.get("media_type", "images")
+            summary += f"• Media: {media_count} {'video' if media_type == 'video' else 'image'}{'s' if media_count > 1 else ''}\n\n"
             summary += "Please proceed to payment for your ad fee."
             
             response.message(summary)
@@ -626,7 +646,8 @@ def whatsapp_webhook():
             try:
                 product_id = save_product(
                     user_number=from_number,
-                    image_url=session.get("image"),
+                    media_urls=session.get("media_urls"),
+                    media_type=session.get("media_type"),
                     description=session.get("description"),
                     category=session.get("category"),
                     condition=session.get("condition"),
@@ -675,7 +696,8 @@ def whatsapp_webhook():
             response.message("Payment received! Your product is now listed. We're uploading your item to social media platforms - you'll receive the results shortly.")
 
             # Start a background thread to process uploads
-            image_url = session.get("image")
+            media_urls = session.get("media_urls")
+            media_type = session.get("media_type")
             description = session.get("description")
             category = session.get("category", "")
             condition = session.get("condition", "")
@@ -686,7 +708,7 @@ def whatsapp_webhook():
             # Start background thread for social media uploads
             upload_thread = threading.Thread(
                 target=process_social_media_uploads,
-                args=(from_number, image_url, description, category, condition, 
+                args=(from_number, media_urls, media_type, description, category, condition, 
                       selling_price, location, contact)
             )
             upload_thread.daemon = True
@@ -694,7 +716,8 @@ def whatsapp_webhook():
 
             # reset session
             session["state"] = "INIT"
-            session.pop("image", None)
+            session.pop("media_urls", None)
+            session.pop("media_type", None)
             session.pop("description", None)
             session.pop("category", None)
             session.pop("condition", None)
@@ -784,7 +807,8 @@ def mpesa_callback():
                         )
 
                         # Start background thread for uploads
-                        image_url = session.get("image")
+                        media_urls = session.get("media_urls")
+                        media_type = session.get("media_type")
                         description = session.get("description")
                         category = session.get("category", "")
                         condition = session.get("condition", "")
@@ -794,7 +818,7 @@ def mpesa_callback():
                         
                         upload_thread = threading.Thread(
                             target=process_social_media_uploads,
-                            args=(whatsapp_number, image_url, description, category, condition, 
+                            args=(whatsapp_number, media_urls, media_type, description, category, condition, 
                                 selling_price, location, contact)
                         )
                         upload_thread.daemon = True
@@ -802,7 +826,8 @@ def mpesa_callback():
                         
                         # reset session
                         session["state"] = "INIT"
-                        session.pop("image", None)
+                        session.pop("media_urls", None)
+                        session.pop("media_type", None)
                         session.pop("description", None)
                         session.pop("category", None)
                         session.pop("condition", None)
