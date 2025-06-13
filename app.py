@@ -382,7 +382,14 @@ def whatsapp_webhook():
         session.pop("payment_amount", None)
         session.pop("transaction_id", None)
         session.pop("products", None)
-        response.message("Welcome to Cashify! Please send me a picture to post a new item for sale, or type SOLD to mark one of your items as sold.")
+        
+        # Check if user has active products before mentioning SOLD option
+        products = get_user_products(from_number)
+        if products:
+            response.message("Welcome to Cashify! Please send me a picture to post a new item for sale, or type SOLD to mark one of your items as sold.")
+        else:
+            response.message("Welcome to Cashify! Please send me a picture to post a new item for sale.")
+            
         set_session(from_number, session)
         return str(response)
 
@@ -449,7 +456,12 @@ def whatsapp_webhook():
                 current_app.logger.error(f"Error processing media: {str(e)}")
                 response.message("Sorry, I couldn't process your image. Could you please try sending it again?")
         else:
-            response.message("Hi! Send me a picture to post a new item for sale, or type SOLD to mark one of your items as sold.")
+            # Check if user has products before mentioning SOLD option
+            products = get_user_products(from_number)
+            if products:
+                response.message("Hi! Send me a picture to post a new item for sale, or type SOLD to mark one of your items as sold.")
+            else:
+                response.message("Hi! Send me a picture to post a new item for sale.")
 
     elif state == "AWAITING_PRODUCT_SELECTION":
         try:
