@@ -1,17 +1,15 @@
 from flask import Flask, request, current_app, jsonify
 from twilio.rest import Client
-from twilio.twiml.messaging_response import Message, MessagingResponse
+from twilio.twiml.messaging_response import MessagingResponse
 from pymongo import MongoClient
 import os
 import requests
-import time
 import uuid
-import json
 import boto3
 import threading
 from io import BytesIO
 from datetime import datetime
-from payment import initiate_payment
+from pesapal import initiate_payment, check_payment_status
 from facebook_graph_api import upload_to_facebook, upload_to_instagram
 from bson import ObjectId
 
@@ -616,8 +614,6 @@ def whatsapp_webhook():
         else:
             response.message("I didn't catch that. Please send me a text description for your item.")
 
-    # ...existing code... (rest of the states remain the same until AWAITING_CONTACT)
-
     elif state == "AWAITING_CONTACT":
         if incoming_text:
             session["contact"] = incoming_text
@@ -638,98 +634,70 @@ def whatsapp_webhook():
             media_count = len(session.get("media_urls", []))
             media_type = session.get("media_type", "images")
             summary += f"• Media: {media_count} {'video' if media_type == 'video' else 'image'}{'s' if media_count > 1 else ''}\n\n"
-            summary += "Please proceed to payment for your ad fee."
             
             response.message(summary)
 
-            # Save complete product info to database
             try:
-                product_id = save_product(
-                    user_number=from_number,
-                    media_urls=session.get("media_urls"),
-                    media_type=session.get("media_type"),
-                    description=session.get("description"),
-                    category=session.get("category"),
-                    condition=session.get("condition"),
-                    buying_price=session.get("buying_price"),
-                    selling_price=session.get("selling_price"),
-                    reason_for_selling=session.get("reason_for_selling"),
-                    location=session.get("location"),
-                    contact=session.get("contact")
-                )
-                session["product_id"] = product_id
-                set_session(from_number, session)
-                current_app.logger.info(f"Product saved to database with ID: {product_id}")
+                # Initiate Pesapal payment with amount 1 KES
+                result = initiate_payment(1, from_number, "Cashify Ad Fee")
+                
+                if success:
+                    # Store pending payment for callback tracking
+                    pending_payment = {
+                        "user_number": from_number,
+                        "order_tracking_id": result.get('order_tracking_id'),
+                        "merchant_reference": result.get('merchant_reference'),
+                        "created_at": datetime.now(datetime.timezone.utc),
+                        "status": "pending"
+                    }
+                    
+                    # Store in a separate collection for tracking
+                    db.pending_payments.insert_one(pending_payment)
+                    
+                    # Update session state
+                    session["state"] = "PAYMENT_INITIATED"
+                    session["payment_amount"] = 1
+                    session["order_tracking_id"] = result.get('order_tracking_id')
+                    
+                    payment_message = f"Please complete your payment by visiting: {result['redirect_url']}\n\n"
+                    payment_message += "We'll notify you once payment is confirmed."
+                    
+                    response.message(payment_message)
+                else:
+                    response.message(f"Sorry, we couldn't process your payment request: {result}. Please try again.")
+                    # reset session
+                    session["state"] = "INIT"
+                    session.pop("media_urls", None)
+                    session.pop("media_type", None)
+                    session.pop("description", None)
+                    session.pop("category", None)
+                    session.pop("condition", None)
+                    session.pop("buying_price", None)
+                    session.pop("selling_price", None)
+                    session.pop("reason_for_selling", None)
+                    session.pop("location", None)
+                    session.pop("contact", None)
+                    session.pop("payment_amount", None)
+                    session.pop("transaction_id", None)
+                    set_session(from_number, session)
+                    
             except Exception as e:
-                current_app.logger.error(f"Error saving product to database: {str(e)}")
-
-            # try:
-            #     # Initiate M-Pesa payment with amount 1 KES
-            #     success, result = initiate_payment(from_number, 1, "Cashify Ad Fee")
-            #     
-            #     if success:
-            #         # Update session state
-            #         session["state"] = "PAYMENT_INITIATED"
-            #         session["payment_amount"] = 1
-            #         
-            #         response.message("Payment request sent to your phone. Please enter your M-Pesa PIN to complete the transaction. We'll notify you once payment is confirmed.")
-            #     else:
-            #         response.message(f"Sorry, we couldn't process your payment request: {result}. Please try again.")
-            #         # reset session
-            #         session["state"] = "INIT"
-            #         session.pop("image", None)
-            #         session.pop("description", None)
-            #         session.pop("payment_amount", None)
-            #         session.pop("transaction_id", None)
-            #         set_session(from_number, session)
-            # except Exception as e:
-            #     response.message(f"Sorry, we couldn't process your payment request: {str(e)}. Please try again.")
-            #     # reset session
-            #     session["state"] = "INIT"
-            #     session.pop("image", None)
-            #     session.pop("description", None)
-            #     session.pop("payment_amount", None)
-            #     session.pop("transaction_id", None)
-            #     set_session(from_number, session)
-
-            # Immediately respond with a message that uploads are in progress
-            response.message("Payment received! Your product is now listed. We're uploading your item to social media platforms - you'll receive the results shortly.")
-
-            # Start a background thread to process uploads
-            media_urls = session.get("media_urls")
-            media_type = session.get("media_type")
-            description = session.get("description")
-            category = session.get("category", "")
-            condition = session.get("condition", "")
-            selling_price = session.get("selling_price", "")
-            location = session.get("location", "")
-            contact = session.get("contact", "")
-            
-            # Start background thread for social media uploads
-            upload_thread = threading.Thread(
-                target=process_social_media_uploads,
-                args=(from_number, media_urls, media_type, description, category, condition, 
-                      selling_price, location, contact)
-            )
-            upload_thread.daemon = True
-            upload_thread.start()
-
-            # reset session
-            session["state"] = "INIT"
-            session.pop("media_urls", None)
-            session.pop("media_type", None)
-            session.pop("description", None)
-            session.pop("category", None)
-            session.pop("condition", None)
-            session.pop("buying_price", None)
-            session.pop("selling_price", None)
-            session.pop("reason_for_selling", None)
-            session.pop("location", None)
-            session.pop("contact", None)
-            session.pop("payment_amount", None)
-            session.pop("transaction_id", None)
-            session.pop("product_id", None)
-            set_session(from_number, session)
+                response.message(f"Sorry, we couldn't process your payment request: {str(e)}. Please try again.")
+                # reset session
+                session["state"] = "INIT"
+                session.pop("media_urls", None)
+                session.pop("media_type", None)
+                session.pop("description", None)
+                session.pop("category", None)
+                session.pop("condition", None)
+                session.pop("buying_price", None)
+                session.pop("selling_price", None)
+                session.pop("reason_for_selling", None)
+                session.pop("location", None)
+                session.pop("contact", None)
+                session.pop("payment_amount", None)
+                session.pop("transaction_id", None)
+                set_session(from_number, session)
 
         else:
             response.message("I didn't catch that. Please provide your contact information.")
@@ -746,106 +714,153 @@ def whatsapp_webhook():
     return str(response)
 
 
-@app.route("/mpesa-callback", methods=["POST"])
-def mpesa_callback():
+@app.route("/pesapal-callback", methods=["GET", "POST"])
+def pesapal_callback():
     """
-    Handle callbacks from M-Pesa payment system
+    Handle callbacks from Pesapal payment system
     """
-    current_app.logger.info("------------------------------Callback Received------------------------------")
+    current_app.logger.info("------------------------------Pesapal Callback Received------------------------------")
 
-    # Get the callback data from M-Pesa
-    callback_data = request.get_json()
-    
-    # Check if the callback contains success information
-    if 'Body' in callback_data and 'stkCallback' in callback_data['Body']:
-        stk_callback = callback_data['Body']['stkCallback']
-        
-        # Extract the result code
-        result_code = stk_callback.get('ResultCode')
-        
-        if result_code == 0:  # Payment was successful
-            current_app.logger.info("Payment successful!")
-            # Extract payment details
-            checkout_request_id = stk_callback.get('CheckoutRequestID')
+    try:
+        # Pesapal sends callbacks as GET requests with query parameters
+        if request.method == "GET":
+            order_tracking_id = request.args.get('OrderTrackingId')
+            merchant_reference = request.args.get('OrderMerchantReference')
+
+            # Extract phone number from merchant reference or session
+            # Since we don't get phone number directly from Pesapal, 
+            # we need to find the user by checking sessions
+            user_number = None
+            pending_payment = db.pending_payments.find_one({"order_tracking_id": order_tracking_id})
+            if pending_payment:
+                user_number = pending_payment["user_number"]
             
-            # Extract callback metadata to identify the user
-            if 'CallbackMetadata' in stk_callback and 'Item' in stk_callback['CallbackMetadata']:
-                items = stk_callback['CallbackMetadata']['Item']
+            current_app.logger.info(f"Pesapal callback - Order ID: {order_tracking_id}, Merchant Ref: {merchant_reference}, User Number: {user_number}")
+            
+            if order_tracking_id:
+                # Check payment status with Pesapal
+                payment_status = check_payment_status(order_tracking_id)
+                current_app.logger.info(f"Payment status: {payment_status}")
                 
-                # Find the phone number in the metadata
-                phone_number = None
-                for item in items:
-                    if item.get('Name') == 'PhoneNumber':
-                        phone_number = item.get('Value')
-                        break
-                
-                if phone_number:
-                    current_app.logger.info(f"Payment received from phone number: {phone_number}")
-
-                    # Format phone number for our session key (add "whatsapp:" prefix)
-                    whatsapp_number = f"whatsapp:+{phone_number}"
+                # Check if payment was successful
+                if payment_status.get('payment_status_description') == 'Completed':
+                    current_app.logger.info("Payment successful!")
                     
-                    # Get user session
-                    session = get_session(whatsapp_number)
-
-                    # Check if this user is awaiting payment confirmation
-                    if session.get('state') == "PAYMENT_INITIATED":
-                        # Send initial confirmation message to the user
-                        client = Client(os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
-
-                        # Get the Twilio number and ensure it has the whatsapp: prefix
-                        twilio_number = os.getenv('TWILIO_WHATSAPP_NUMBER')
-                        if not twilio_number.startswith('whatsapp:'):
-                            twilio_number = f"whatsapp:{twilio_number}"
-
-                        initial_message = "Payment received! Your product is now listed. We're uploading your item to social media platforms - you'll receive the results shortly."
+                    if user_number:
+                        current_app.logger.info(f"Payment received from user: {user_number}")
                         
-                        client.messages.create(
-                            body=initial_message,
-                            from_=twilio_number,
-                            to=whatsapp_number
-                        )
+                        # Get user session
+                        session = get_session(user_number)
 
-                        # Start background thread for uploads
-                        media_urls = session.get("media_urls")
-                        media_type = session.get("media_type")
-                        description = session.get("description")
-                        category = session.get("category", "")
-                        condition = session.get("condition", "")
-                        selling_price = session.get("selling_price", "")
-                        location = session.get("location", "")
-                        contact = session.get("contact", "")
-                        
-                        upload_thread = threading.Thread(
-                            target=process_social_media_uploads,
-                            args=(whatsapp_number, media_urls, media_type, description, category, condition, 
-                                selling_price, location, contact)
-                        )
-                        upload_thread.daemon = True
-                        upload_thread.start()
-                        
-                        # reset session
-                        session["state"] = "INIT"
-                        session.pop("media_urls", None)
-                        session.pop("media_type", None)
-                        session.pop("description", None)
-                        session.pop("category", None)
-                        session.pop("condition", None)
-                        session.pop("buying_price", None)
-                        session.pop("selling_price", None)
-                        session.pop("reason_for_selling", None)
-                        session.pop("location", None)
-                        session.pop("contact", None)
-                        session.pop("payment_amount", None)
-                        session.pop("transaction_id", None)
-                        session.pop("product_id", None)
-                        set_session(whatsapp_number, session)
+                        # Check if this user is awaiting payment confirmation
+                        if session.get('state') == "PAYMENT_INITIATED":
+                            save_product(
+                                user_number=user_number,
+                                media_urls=session.get("media_urls"),
+                                media_type=session.get("media_type"),
+                                description=session.get("description"),
+                                category=session.get("category"),
+                                condition=session.get("condition"),
+                                buying_price=session.get("buying_price"),
+                                selling_price=session.get("selling_price"),
+                                reason_for_selling=session.get("reason_for_selling"),
+                                location=session.get("location"),
+                                contact=session.get("contact")
+                            )
+            
+                            # Send initial confirmation message to the user
+                            client = Client(os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
+
+                            # Get the Twilio number and ensure it has the whatsapp: prefix
+                            twilio_number = os.getenv('TWILIO_WHATSAPP_NUMBER')
+                            if not twilio_number.startswith('whatsapp:'):
+                                twilio_number = f"whatsapp:{twilio_number}"
+
+                            initial_message = "Payment received! Your product is now listed. We're uploading your item to social media platforms - you'll receive the results shortly."
+                            
+                            client.messages.create(
+                                body=initial_message,
+                                from_=twilio_number,
+                                to=user_number
+                            )
+
+                            # Start background thread for uploads
+                            media_urls = session.get("media_urls")
+                            media_type = session.get("media_type")
+                            description = session.get("description")
+                            category = session.get("category", "")
+                            condition = session.get("condition", "")
+                            selling_price = session.get("selling_price", "")
+                            location = session.get("location", "")
+                            contact = session.get("contact", "")
+                            
+                            upload_thread = threading.Thread(
+                                target=process_social_media_uploads,
+                                args=(user_number, media_urls, media_type, description, category, condition, 
+                                    selling_price, location, contact)
+                            )
+                            upload_thread.daemon = True
+                            upload_thread.start()
+                            
+                            # reset session
+                            session["state"] = "INIT"
+                            session.pop("media_urls", None)
+                            session.pop("media_type", None)
+                            session.pop("description", None)
+                            session.pop("category", None)
+                            session.pop("condition", None)
+                            session.pop("buying_price", None)
+                            session.pop("selling_price", None)
+                            session.pop("reason_for_selling", None)
+                            session.pop("location", None)
+                            session.pop("contact", None)
+                            session.pop("payment_amount", None)
+                            session.pop("transaction_id", None)
+                            set_session(user_number, session)
+                            
+                            # Clean up pending payment record
+                            db.pending_payments.delete_one({"order_tracking_id": order_tracking_id})
+                            
+                elif payment_status.get('payment_status_description') in ['Failed', 'Invalid']:
+                    current_app.logger.info("Payment failed!")
+                    
+                    if user_number:
+                        try:
+                            client = Client(os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
+                            twilio_number = os.getenv('TWILIO_WHATSAPP_NUMBER')
+                            if not twilio_number.startswith('whatsapp:'):
+                                twilio_number = f"whatsapp:{twilio_number}"
+
+                            message = "Your payment was unsuccessful. Please try again or contact support if the issue persists."
+                            
+                            client.messages.create(
+                                body=message,
+                                from_=twilio_number,
+                                to=user_number
+                            )
+                        except Exception as e:
+                            current_app.logger.error(f"Error sending failure notification: {str(e)}")
+
+                    # Clean up pending payment record
+                    db.pending_payments.delete_one({"order_tracking_id": order_tracking_id})
+        
+        # Handle POST requests (if Pesapal sends any)
+        elif request.method == "POST":
+            callback_data = request.get_json() or request.form.to_dict()
+            current_app.logger.info(f"Pesapal POST callback: {callback_data}")
+            
+            # Process POST callback if needed
+            order_tracking_id = callback_data.get('OrderTrackingId')
+            if order_tracking_id:
+                # Similar processing as GET request
+                pass
+
+    except Exception as e:
+        current_app.logger.error(f"Error processing Pesapal callback: {str(e)}")
     
-    # Always return a success response to M-Pesa
-    return {
-        "ResultCode": 0,
-        "ResultDesc": "Accepted"
-    }
+    # Return success response
+    return "OK", 200
+
 
 if __name__ == "__main__":
     app.run(debug=True)
