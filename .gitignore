@@ -1,2 +1,4 @@
 *.env
 ngrok.exe
+/static
+__pycache__/
