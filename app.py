@@ -8,8 +8,10 @@ import requests
 from requests.auth import HTTPBasicAuth
 import time
 import json
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app,resources={r"/*": {"origins": "*"}})
 
 redis_client = redis.Redis(host=os.getenv("REDIS_HOST"), port=int(os.getenv("REDIS_PORT")), decode_responses=True)
 
