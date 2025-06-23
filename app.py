@@ -1,4 +1,5 @@
 from flask import Flask, request, current_app, jsonify
+from flask_cors import CORS
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
 from pymongo import MongoClient
@@ -14,6 +15,13 @@ from facebook_graph_api import upload_to_facebook, upload_to_instagram
 from bson import ObjectId
 
 app = Flask(__name__)
+
+# Configure CORS with specific settings
+CORS(app, resources={
+    r"/products*": {"origins": "*"},
+    r"/whatsapp": {"origins": "*"},
+    r"/pesapal-callback": {"origins": "*"}
+})
 
 # MongoDB connection
 mongo_client = MongoClient(os.getenv("MONGODB_URI", "mongodb://localhost:27017/"))
@@ -622,6 +630,100 @@ def whatsapp_webhook():
         else:
             response.message("I didn't catch that. Please send me a text description for your item.")
 
+    elif state == "AWAITING_CATEGORY":
+        categories = ["Electronics", "Clothing", "Furniture", "Vehicles", 
+                     "Home Appliances", "Real Estate", "Services", "Other"]
+        
+        try:
+            # Handle both number input and text input
+            if incoming_text.isdigit() and 1 <= int(incoming_text) <= len(categories):
+                selected_category = categories[int(incoming_text) - 1]
+            elif incoming_text in categories:
+                selected_category = incoming_text
+            else:
+                raise ValueError("Invalid category")
+            
+            session["category"] = selected_category
+            session["state"] = "AWAITING_CONDITION"
+            set_session(from_number, session)
+            
+            # Send condition options
+            conditions = ["New", "Used - Like New", "Used - Good", "Used - Fair"]
+            condition_message = "Please select the condition by typing the number:\n\n" + \
+                               "\n".join([f"{i+1}. {cond}" for i, cond in enumerate(conditions)])
+            
+            response.message(condition_message)
+        except:
+            category_options = "\n".join([f"{i+1}. {cat}" for i, cat in enumerate(categories)])
+            response.message(f"Please select a valid category number or name:\n\n{category_options}")
+    
+    elif state == "AWAITING_CONDITION":
+        conditions = ["New", "Used - Like New", "Used - Good", "Used - Fair"]
+        
+        try:
+            # Handle both number input and text input
+            if incoming_text.isdigit() and 1 <= int(incoming_text) <= len(conditions):
+                selected_condition = conditions[int(incoming_text) - 1]
+            elif incoming_text in conditions or incoming_text.lower() in [c.lower() for c in conditions]:
+                selected_condition = incoming_text
+            else:
+                raise ValueError("Invalid condition")
+            
+            session["condition"] = selected_condition
+            session["state"] = "AWAITING_BUYING_PRICE"
+            set_session(from_number, session)
+            
+            response.message("Please enter the buying price (numbers only):")
+        except:
+            condition_options = "\n".join([f"{i+1}. {cond}" for i, cond in enumerate(conditions)])
+            response.message(f"Please select a valid condition number or name:\n\n{condition_options}")
+    
+    elif state == "AWAITING_BUYING_PRICE":
+        try:
+            # Validate it's a number (can be float)
+            buying_price = float(incoming_text.replace(',', ''))
+            
+            session["buying_price"] = buying_price
+            session["state"] = "AWAITING_SELLING_PRICE"
+            set_session(from_number, session)
+            
+            response.message("Please enter your selling price (numbers only):")
+        except:
+            response.message("Please enter a valid buying price (numbers only):")
+    
+    elif state == "AWAITING_SELLING_PRICE":
+        try:
+            # Validate it's a number (can be float)
+            selling_price = float(incoming_text.replace(',', ''))
+            
+            session["selling_price"] = selling_price
+            session["state"] = "AWAITING_REASON"
+            set_session(from_number, session)
+            
+            response.message("Please provide a brief reason for selling:")
+        except:
+            response.message("Please enter a valid selling price (numbers only):")
+    
+    elif state == "AWAITING_REASON":
+        if incoming_text:
+            session["reason_for_selling"] = incoming_text
+            session["state"] = "AWAITING_LOCATION"
+            set_session(from_number, session)
+            
+            response.message("Please share your location (city/town):")
+        else:
+            response.message("I didn't catch that. Please provide a reason for selling.")
+    
+    elif state == "AWAITING_LOCATION":
+        if incoming_text:
+            session["location"] = incoming_text
+            session["state"] = "AWAITING_CONTACT"
+            set_session(from_number, session)
+            
+            response.message("Please provide your preferred contact information for buyers (phone or email):")
+        else:
+            response.message("I didn't catch that. Please provide your location.")
+    
     elif state == "AWAITING_CONTACT":
         if incoming_text:
             session["contact"] = incoming_text
