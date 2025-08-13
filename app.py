@@ -20,7 +20,8 @@ app = Flask(__name__)
 CORS(app, resources={
     r"/products*": {"origins": "*"},
     r"/whatsapp": {"origins": "*"},
-    r"/pesapal-callback": {"origins": "*"}
+    r"/pesapal-callback": {"origins": "*"},
+    r"/fees": {"origins": "*"}  # Add CORS for the new fees endpoint
 })
 
 # MongoDB connection
@@ -28,6 +29,7 @@ mongo_client = MongoClient(os.getenv("MONGODB_URI", "mongodb://localhost:27017/"
 db = mongo_client[os.getenv("MONGODB_DATABASE", "cashify")]
 sessions_collection = db.sessions
 products_collection = db.products
+fees_collection = db.fees  # Add collection for category fees
 
 # AWS S3 Configuration
 s3_client = boto3.client(
@@ -37,6 +39,32 @@ s3_client = boto3.client(
     region_name=os.getenv('AWS_REGION', 'us-east-1')
 )
 S3_BUCKET = os.getenv('S3_BUCKET_NAME')
+
+def initialize_default_fees():
+    """
+    Initialize default fees in MongoDB if they don't exist
+    """
+    if fees_collection.count_documents({}) == 0:
+        default_fees = {
+            "default": 400,
+            "Real Estate": 1500,
+            "Vehicles": 1500
+        }
+        fees_collection.insert_one(default_fees)
+        current_app.logger.info("Initialized default category fees")
+
+def get_fee_for_category(category):
+    """
+    Get the fee for a specific category.
+    If no fee is set for that category, return the default fee.
+    """
+    fees = fees_collection.find_one()
+    if not fees:
+        initialize_default_fees()
+        fees = fees_collection.find_one()
+    
+    # Return the category-specific fee if it exists, otherwise return default
+    return fees.get(category, fees.get('default', 400))
 
 def upload_to_s3(file_content, filename, content_type='image/jpeg'):
     """
@@ -374,6 +402,68 @@ def get_product(product_id):
             "error": "Failed to fetch product"
         }), 500
 
+@app.route("/fees", methods=["GET", "POST"])
+def manage_fees():
+    """
+    Endpoint to get or update category fees
+    """
+    try:
+        # Initialize fees if they don't exist
+        initialize_default_fees()
+        
+        if request.method == "GET":
+            # Return the current fee structure
+            fees = fees_collection.find_one({}, {"_id": 0})  # Exclude _id field
+            return jsonify({
+                "success": True,
+                "data": fees
+            })
+            
+        elif request.method == "POST":
+            # Update fees
+            data = request.json
+            
+            if not data or not isinstance(data, dict):
+                return jsonify({
+                    "success": False,
+                    "error": "Invalid data format. Expected dictionary of category names and fees."
+                }), 400
+            
+            # Get current fees and update with new values
+            current_fees = fees_collection.find_one({})
+            
+            # Delete _id from current fees for easy update
+            if current_fees and "_id" in current_fees:
+                current_fees_id = current_fees["_id"]
+                del current_fees["_id"]
+            else:
+                # If no fees exist, create new document
+                current_fees = {"default": 400}
+                result = fees_collection.insert_one(current_fees)
+                current_fees_id = result.inserted_id
+            
+            # Update with new fees
+            current_fees.update(data)
+            
+            # Save updated fees
+            fees_collection.update_one(
+                {"_id": current_fees_id},
+                {"$set": current_fees}
+            )
+            
+            return jsonify({
+                "success": True,
+                "message": "Fees updated successfully",
+                "data": current_fees
+            })
+            
+    except Exception as e:
+        current_app.logger.error(f"Error managing fees: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to manage fees"
+        }), 500
+
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_webhook():
     current_app.logger.info("------------------------------Webhook Received------------------------------")
@@ -413,9 +503,9 @@ def whatsapp_webhook():
         # Check if user has products older than 7 days before mentioning SOLD option
         old_products = get_user_products(from_number, min_age_days=7)
         if old_products:
-            response.message("Welcome to Cashify! Please send me up to 3 images or 1 video to post a new item for sale, or type SOLD to mark one of your items as sold.")
+            response.message("Welcome to Cashify! Please send at least 3 images or 1 video to post a new item for sale, or type SOLD to mark one of your items as sold.")
         else:
-            response.message("Welcome to Cashify! Please send me up to 3 images or 1 video to post a new item for sale.")
+            response.message("Welcome to Cashify! Please send at least 3 images or 1 video to post a new item for sale.")
             
         set_session(from_number, session)
         return str(response)
@@ -449,10 +539,6 @@ def whatsapp_webhook():
         
         elif num_media > 0:
             # User has sent media files
-            if num_media > 3:
-                response.message("Please send up to 3 images or 1 video only.")
-                return str(response)
-            
             try:
                 media_urls = []
                 media_type = None
@@ -477,9 +563,18 @@ def whatsapp_webhook():
                         response.message("Please send either images OR video, not both.")
                         return str(response)
                     
-                    # For video, only allow one file
-                    if is_video and num_media > 1:
-                        response.message("Please send only 1 video file.")
+                    # For video, ensure it's exactly 1 file
+                    if is_video and num_media != 1:
+                        response.message("Please send exactly 1 video file.")
+                        return str(response)
+                    
+                    # For images, check minimum requirement
+                    if is_image and num_media < 3:
+                        response.message("Please send at least 3 images. You can send them all at once or add more later.")
+                        # Store the initial images and ask for more
+                        session["media_type"] = "images"
+                        session["state"] = "AWAITING_MORE_MEDIA"
+                        set_session(from_number, session)
                         return str(response)
                     
                     # Download the media from Twilio with auth
@@ -522,29 +617,28 @@ def whatsapp_webhook():
             # User wants to add more images (only if they already have images)
             current_media = session.get("media_urls", [])
             if session.get("media_type") == "video":
-                response.message("You already uploaded a video. Please type RESET to start over with new media.")
-            elif len(current_media) >= 3:
-                response.message("You already have 3 images. Please type RESET to start over with new media.")
+                response.message("You already uploaded a video. No need to add more media.")
             else:
-                remaining = 3 - len(current_media)
-                response.message(f"Please send up to {remaining} more image{'s' if remaining > 1 else ''}.")
+                # For images, encourage adding at least 3
+                if len(current_media) >= 3:
+                    response.message(f"You already have {len(current_media)} images which meets the minimum requirement. You can type CONTINUE to proceed or add more images if desired.")
+                else:
+                    needed = 3 - len(current_media)
+                    response.message(f"Please send at least {needed} more image{'s' if needed > 1 else ''} to meet the minimum requirement of 3 images.")
+                
                 session["state"] = "AWAITING_MORE_MEDIA"
                 set_session(from_number, session)
         else:
             # Check if user has products older than 7 days before mentioning SOLD option
             old_products = get_user_products(from_number, min_age_days=7)
             if old_products:
-                response.message("Hi! Send me up to 3 images or 1 video to post a new item for sale, or type SOLD to mark one of your items as sold.")
+                response.message("Hi! Send at least 3 images or 1 video to post a new item for sale, or type SOLD to mark one of your items as sold.")
             else:
-                response.message("Hi! Send me up to 3 images or 1 video to post a new item for sale.")
+                response.message("Hi! Send at least 3 images or 1 video to post a new item for sale.")
 
     elif state == "AWAITING_MORE_MEDIA":
         if num_media > 0:
             current_media = session.get("media_urls", [])
-            
-            if len(current_media) + num_media > 3:
-                response.message(f"You can only add {3 - len(current_media)} more image{'s' if 3 - len(current_media) > 1 else ''}.")
-                return str(response)
             
             try:
                 # Process additional media files
@@ -574,16 +668,34 @@ def whatsapp_webhook():
                     current_media.append(public_media_url)
                 
                 session["media_urls"] = current_media
-                session["state"] = "AWAITING_DESCRIPTION"
-                set_session(from_number, session)
                 
-                response.message(f"Great! I now have {len(current_media)} images. Please enter a description for your item.")
+                # Check if we have enough images now
+                if len(current_media) >= 3:
+                    session["state"] = "AWAITING_DESCRIPTION"
+                    set_session(from_number, session)
+                    response.message(f"Great! I now have {len(current_media)} images, which meets the minimum requirement. Please enter a description for your item.")
+                else:
+                    # Still need more images
+                    needed = 3 - len(current_media)
+                    response.message(f"I now have {len(current_media)} images. Please send at least {needed} more image{'s' if needed > 1 else ''} to meet the minimum requirement.")
+                    set_session(from_number, session)
                 
             except Exception as e:
                 current_app.logger.error(f"Error processing additional media: {str(e)}")
                 response.message("Sorry, I couldn't process your images. Please try again.")
+        elif incoming_text.lower() == "continue":
+            # Check if they have enough images
+            current_media = session.get("media_urls", [])
+            if len(current_media) >= 3:
+                session["state"] = "AWAITING_DESCRIPTION"
+                set_session(from_number, session)
+                response.message("Please enter a description for your item.")
+            else:
+                needed = 3 - len(current_media)
+                response.message(f"You need at least {needed} more image{'s' if needed > 1 else ''} to meet the minimum requirement of 3 images before you can continue.")
         else:
-            response.message("Please send the additional images, or type CONTINUE to proceed with your current images.")
+            needed = 3 - len(session.get("media_urls", []))
+            response.message(f"Please send {needed} more image{'s' if needed > 1 else ''} to meet the minimum requirement, or type RESET to start over.")
 
     elif state == "AWAITING_PRODUCT_SELECTION":
         try:
@@ -748,10 +860,14 @@ def whatsapp_webhook():
             response.message(summary)
 
             try:
-                # Initiate Pesapal payment with amount 1 KES
-                result = initiate_payment(1, from_number, "Cashify Ad Fee")
+                # Get the appropriate fee based on category
+                category = session.get('category', '')
+                ad_fee = get_fee_for_category(category)
                 
-                if success:
+                # Initiate Pesapal payment with the correct fee
+                result = initiate_payment(ad_fee, from_number, f"Cashify Ad Fee - {category}")
+                
+                if result and result.get('redirect_url'):
                     # Store pending payment for callback tracking
                     pending_payment = {
                         "user_number": from_number,
@@ -766,10 +882,13 @@ def whatsapp_webhook():
                     
                     # Update session state
                     session["state"] = "PAYMENT_INITIATED"
-                    session["payment_amount"] = 1
+                    session["payment_amount"] = ad_fee
                     session["order_tracking_id"] = result.get('order_tracking_id')
                     
-                    payment_message = f"Please complete your payment by visiting: {result['redirect_url']}\n\n"
+                    # Format fee with comma for thousands
+                    formatted_fee = "{:,}".format(ad_fee)
+                    
+                    payment_message = f"Your ad fee is KES {formatted_fee}. Please complete your payment by visiting: {result['redirect_url']}\n\n"
                     payment_message += "We'll notify you once payment is confirmed."
                     
                     response.message(payment_message)
