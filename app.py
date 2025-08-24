@@ -10,7 +10,7 @@ import boto3
 import threading
 from io import BytesIO
 from datetime import datetime, timedelta
-from pesapal import initiate_payment, check_payment_status
+from payment import initiate_pesapal_payment, check_pesapal_payment_status
 from facebook_graph_api import upload_to_facebook, upload_to_instagram
 from bson import ObjectId
 
@@ -21,7 +21,8 @@ CORS(app, resources={
     r"/products*": {"origins": "*"},
     r"/whatsapp": {"origins": "*"},
     r"/pesapal-callback": {"origins": "*"},
-    r"/fees": {"origins": "*"}  # Add CORS for the new fees endpoint
+    r"/fees": {"origins": "*"},
+    r"/escrow/*": {"origins": "*"}
 })
 
 # MongoDB connection
@@ -29,7 +30,8 @@ mongo_client = MongoClient(os.getenv("MONGODB_URI", "mongodb://localhost:27017/"
 db = mongo_client[os.getenv("MONGODB_DATABASE", "cashify")]
 sessions_collection = db.sessions
 products_collection = db.products
-fees_collection = db.fees  # Add collection for category fees
+fees_collection = db.fees  # Collection for category fees
+escrow_payments_collection = db.escrow_payments
 
 # AWS S3 Configuration
 s3_client = boto3.client(
@@ -463,6 +465,184 @@ def manage_fees():
             "success": False,
             "error": "Failed to manage fees"
         }), 500
+    
+@app.route("/escrow/pay", methods=["POST"])
+def create_escrow_payment():
+    """
+    Endpoint for buyers to pay for an item.
+    The money will be held in escrow until the item is confirmed as received.
+    """
+    try:
+        data = request.json
+        
+        # Validate required fields
+        required_fields = ["product_id", "buyer_phone"]
+        for field in required_fields:
+            if field not in data:
+                return jsonify({"success": False, "error": f"Missing required field: {field}"}), 400
+        
+        # Get product details
+        product = products_collection.find_one({"_id": ObjectId(data["product_id"])})
+        if not product:
+            return jsonify({"success": False, "error": "Product not found"}), 404
+            
+        if product.get("sold", False) or product.get("status") == "reserved":
+            return jsonify({"success": False, "error": "Product is not available"}), 400
+            
+        # Format buyer phone number
+        from payment import format_phone_number
+        buyer_phone = format_phone_number(data["buyer_phone"])
+        
+        # Get payment amount from product
+        amount = float(product.get("selling_price", 0))
+        if amount <= 0:
+            return jsonify({"success": False, "error": "Invalid product price"}), 400
+        
+        # Create escrow payment record
+        escrow_payment = {
+            "product_id": data["product_id"],
+            "seller_number": product["user_number"],
+            "buyer_phone": buyer_phone,
+            "amount": amount,
+            "description": f"Purchase of {product['description']}",
+            "status": "pending",
+            "created_at": datetime.utcnow()
+        }
+        
+        # Insert escrow payment record
+        result = escrow_payments_collection.insert_one(escrow_payment)
+        escrow_id = str(result.inserted_id)
+        
+        # Initiate payment with Pesapal
+        from payment import initiate_pesapal_payment
+        payment_result = initiate_pesapal_payment(
+            amount, 
+            buyer_phone, 
+            f"Purchase of {product['description']}"
+        )
+        
+        if payment_result and payment_result.get('redirect_url'):
+            # Update escrow payment with Pesapal tracking details
+            escrow_payments_collection.update_one(
+                {"_id": result.inserted_id},
+                {"$set": {
+                    "order_tracking_id": payment_result.get('order_tracking_id'),
+                    "merchant_reference": payment_result.get('merchant_reference')
+                }}
+            )
+            
+            # Temporarily mark the product as reserved
+            products_collection.update_one(
+                {"_id": ObjectId(data["product_id"])},
+                {"$set": {"status": "reserved", "reserved_by": escrow_id}}
+            )
+            
+            return jsonify({
+                "success": True,
+                "data": {
+                    "escrow_id": escrow_id,
+                    "payment_url": payment_result['redirect_url'],
+                    "amount": amount
+                }
+            })
+        else:
+            # Clean up escrow record if payment initiation fails
+            escrow_payments_collection.delete_one({"_id": result.inserted_id})
+            return jsonify({
+                "success": False,
+                "error": "Payment initiation failed"
+            }), 500
+            
+    except Exception as e:
+        current_app.logger.error(f"Error creating escrow payment: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to create escrow payment"
+        }), 500
+
+@app.route("/escrow/release", methods=["POST"])
+def release_escrow_payment():
+    """
+    Endpoint to release funds to a seller after confirming that 
+    the buyer has received the item.
+    """
+    try:
+        data = request.json
+        
+        # Validate required fields
+        if "escrow_id" not in data:
+            return jsonify({"success": False, "error": "Missing escrow_id"}), 400
+        
+        # Get escrow payment details
+        escrow_payment = escrow_payments_collection.find_one({"_id": ObjectId(data["escrow_id"])})
+        if not escrow_payment:
+            return jsonify({"success": False, "error": "Escrow payment not found"}), 404
+            
+        # Check if payment is already processed
+        if escrow_payment.get("status") == "released":
+            return jsonify({"success": False, "error": "Payment has already been released"}), 400
+        
+        # Check if payment is confirmed
+        if escrow_payment.get("status") != "paid":
+            return jsonify({"success": False, "error": "Payment is not confirmed yet"}), 400
+            
+        # Get product details
+        product = products_collection.find_one({"_id": ObjectId(escrow_payment["product_id"])})
+        if not product:
+            return jsonify({"success": False, "error": "Associated product not found"}), 404
+        
+        # Send money to seller using AfricasTalking
+        from payment import send_money_via_at
+        seller_phone = product["user_number"]
+        amount = escrow_payment["amount"]
+        
+        payment_result = send_money_via_at(
+            seller_phone,
+            amount,
+            f"Payment for {product['description']}"
+        )
+        
+        if payment_result and payment_result.get("status") == "success":
+            # Update escrow payment status
+            escrow_payments_collection.update_one(
+                {"_id": ObjectId(data["escrow_id"])},
+                {"$set": {
+                    "status": "released",
+                    "released_at": datetime.utcnow(),
+                    "payment_reference": payment_result.get("data", {}).get("transactionId")
+                }}
+            )
+            
+            # Mark product as sold
+            products_collection.update_one(
+                {"_id": ObjectId(escrow_payment["product_id"])},
+                {"$set": {
+                    "status": "sold",
+                    "sold": True,
+                    "sold_at": datetime.utcnow(),
+                    "sold_to": escrow_payment.get("buyer_phone")
+                }}
+            )
+            
+            return jsonify({
+                "success": True,
+                "data": {
+                    "message": "Payment released to seller",
+                    "transaction_id": payment_result.get("data", {}).get("transactionId")
+                }
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "error": "Failed to release payment"
+            }), 500
+            
+    except Exception as e:
+        current_app.logger.error(f"Error releasing escrow payment: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to release escrow payment"
+        }), 500
 
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_webhook():
@@ -865,7 +1045,7 @@ def whatsapp_webhook():
                 ad_fee = get_fee_for_category(category)
                 
                 # Initiate Pesapal payment with the correct fee
-                result = initiate_payment(ad_fee, from_number, f"Cashify Ad Fee - {category}")
+                result = initiate_pesapal_payment(ad_fee, from_number, f"Cashify Ad Fee - {category}")
                 
                 if result and result.get('redirect_url'):
                     # Store pending payment for callback tracking
@@ -968,13 +1148,27 @@ def pesapal_callback():
             
             if order_tracking_id:
                 # Check payment status with Pesapal
-                payment_status = check_payment_status(order_tracking_id)
+                payment_status = check_pesapal_payment_status(order_tracking_id)
                 current_app.logger.info(f"Payment status: {payment_status}")
                 
                 # Check if payment was successful
                 if payment_status.get('payment_status_description') == 'Completed':
                     current_app.logger.info("Payment successful!")
+
+                    # Check if this is an escrow payment
+                    escrow_payment = db.escrow_payments.find_one({"order_tracking_id": order_tracking_id})
                     
+                    if escrow_payment:
+                        # Update escrow payment status
+                        db.escrow_payments.update_one(
+                            {"_id": escrow_payment["_id"]},
+                            {"$set": {
+                                "status": "paid",
+                                "paid_at": datetime.utcnow(),
+                                "payment_details": payment_status
+                            }}
+                        )
+
                     if user_number:
                         current_app.logger.info(f"Payment received from user: {user_number}")
                         
