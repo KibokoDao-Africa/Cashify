@@ -9,6 +9,11 @@ ENV PYTHONUNBUFFERED 1
 # create a working directory in the container and cd into it
 WORKDIR /bot
 
+# Install ffmpeg
+RUN apt-get update && \
+    apt-get install -y ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
+
 # copy and install dependencies to working directory
 COPY requirements.txt requirements.txt
 RUN pip3 install -r requirements.txt
