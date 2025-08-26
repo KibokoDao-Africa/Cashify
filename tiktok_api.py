@@ -9,7 +9,7 @@ def upload_to_tiktok(media_urls=None, is_video=False, caption=""):
     Upload media to TikTok account. Converts images to video if needed.
     
     Args:
-        media_urls (list): List of URLs to media files
+        media_urls (list): List of URLs to the images/video
         is_video (bool): Whether the media is video (if True, only one video allowed)
         caption (str): The caption for the post
         
