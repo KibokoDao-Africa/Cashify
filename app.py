@@ -1053,7 +1053,7 @@ def whatsapp_webhook():
                         "user_number": from_number,
                         "order_tracking_id": result.get('order_tracking_id'),
                         "merchant_reference": result.get('merchant_reference'),
-                        "created_at": datetime.now(datetime.timezone.utc),
+                        "created_at": datetime.utcnow(),
                         "status": "pending"
                     }
                     
