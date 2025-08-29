@@ -1,6 +1,5 @@
 import os
 import requests
-from flask import current_app
 from moviepy.editor import ImageSequenceClip
 
 
@@ -91,9 +90,7 @@ def upload_to_tiktok(media_urls=None, is_video=False, caption=""):
         if "id" in result:
             return f"https://www.tiktok.com/@{username}/video/{result['id']}"
         else:
-            current_app.logger.info(f"TikTok post error response: {result}")
             raise Exception(f"Failed to post to TikTok: {result.get('error', {}).get('message', 'Unknown error')}")
 
     except Exception as e:
-        current_app.logger.info(f"TikTok upload error: {str(e)}")
         raise e

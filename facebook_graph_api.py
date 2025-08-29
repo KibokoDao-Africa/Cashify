@@ -1,6 +1,5 @@
 import os
 import requests
-from flask import current_app
 
 def upload_to_facebook(media_urls=None, is_video=False, caption=""):
     """
@@ -52,7 +51,6 @@ def upload_to_facebook(media_urls=None, is_video=False, caption=""):
                 else:
                     return f"https://www.facebook.com/photo?fbid={result['id']}"
             else:
-                current_app.logger.info(f"Facebook post error response: {result}")
                 raise Exception(f"Failed to post to Facebook: {result.get('error', {}).get('message', 'Unknown error')}")
         
         # Multiple images (carousel) - only allowed for images
@@ -77,7 +75,6 @@ def upload_to_facebook(media_urls=None, is_video=False, caption=""):
                 if 'id' in upload_result:
                     attached_media.append({"media_fbid": upload_result['id']})
                 else:
-                    current_app.logger.info(f"Facebook image upload error: {upload_result}")
                     raise Exception(f"Failed to upload image to Facebook: {upload_result.get('error', {}).get('message', 'Unknown error')}")
             
             # Create the carousel post
@@ -94,11 +91,9 @@ def upload_to_facebook(media_urls=None, is_video=False, caption=""):
             if 'id' in result:
                 return f"https://www.facebook.com/permalink.php?story_fbid={result['id'].split('_')[1]}&id={os.getenv('FACEBOOK_PAGE_ID')}"
             else:
-                current_app.logger.info(f"Facebook carousel post error: {result}")
                 raise Exception(f"Failed to create carousel post on Facebook: {result.get('error', {}).get('message', 'Unknown error')}")
             
     except Exception as e:
-        current_app.logger.info(f"Facebook upload error: {str(e)}")
         raise e
 
 def upload_to_instagram(media_urls=None, is_video=False, caption="", story=False):
@@ -314,6 +309,5 @@ def upload_to_instagram(media_urls=None, is_video=False, caption="", story=False
                 return publish_data['id']
         
     except Exception as e:
-        current_app.logger.info(f"Instagram upload error: {str(e)}")
         raise e
     
