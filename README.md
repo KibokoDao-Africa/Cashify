@@ -27,4 +27,5 @@ With Cashify, users can text product details and pictures just like in a normal 
 ## 🔒 Smart Contract Integration
 
 Cashify leverages a **StarkNet smart contract** to secure transactions.  
-- Contract Address:  
+- Contract Address:  0x05308F66FE9D42938E0cf7B61a53633C3ba3357aBEcb1Da14E922A5CAB5fdB0
+Smart contract repo : https://github.com/KibokoDao-Africa/Simple-Starknet-Token-Transfer-Contract
