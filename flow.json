@@ -1,0 +1,478 @@
+{
+    "version": "7.0",
+    "data_api_version": "3.0",
+    "name": "Cashify Item Listing",
+    "endpoint_uri": "https://9eec-44-223-64-113.ngrok-free.app/flow-webhook",
+    "endpoint_verification_token": "your_verification_token",
+    "routing_model": {
+        "ITEM_PHOTOS": [
+            "ITEM_DETAILS"
+        ],
+        "ITEM_DETAILS": [
+            "PRICE_INFO"
+        ],
+        "PRICE_INFO": [
+            "CONTACT_INFO"
+        ],
+        "CONTACT_INFO": [
+            "SUMMARY"
+        ],
+        "SUMMARY": [
+            "COMPLETE"
+        ],
+        "COMPLETE": []
+    },
+    "screens": [
+        {
+            "id": "ITEM_PHOTOS",
+            "title": "Item Photos",
+            "data": {},
+            "layout": {
+                "type": "SingleColumnLayout",
+                "children": [
+                    {
+                        "type": "Form",
+                        "name": "photos_form",
+                        "children": [
+                            {
+                                "type": "TextSubheading",
+                                "text": "Item Photos"
+                            },
+                            {
+                                "type": "TextBody",
+                                "text": "Please upload 3-9 clear photos of your item from different angles."
+                            },
+                            {
+                                "type": "PhotoPicker",
+                                "name": "item_photos",
+                                "label": "Upload Item Photos",
+                                "description": "Choose the best photos that showcase your item",
+                                "photo-source": "camera_gallery",
+                                "min-uploaded-photos": 3,
+                                "max-uploaded-photos": 9,
+                                "max-file-size-kb": 10240
+                            },
+                            {
+                                "type": "Footer",
+                                "label": "Continue",
+                                "on-click-action": {
+                                    "name": "data_exchange",
+                                    "payload": {
+                                        "item_photos": "${form.item_photos}"
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        {
+            "id": "ITEM_DETAILS",
+            "title": "Item Details",
+            "data": {
+                "categories": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": "string"
+                            },
+                            "title": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "__example__": [
+                        {
+                            "id": "electronics",
+                            "title": "Electronics"
+                        },
+                        {
+                            "id": "clothing",
+                            "title": "Clothing"
+                        },
+                        {
+                            "id": "furniture",
+                            "title": "Furniture"
+                        },
+                        {
+                            "id": "vehicles",
+                            "title": "Vehicles"
+                        },
+                        {
+                            "id": "home_appliances",
+                            "title": "Home Appliances"
+                        },
+                        {
+                            "id": "real_estate",
+                            "title": "Real Estate"
+                        },
+                        {
+                            "id": "services",
+                            "title": "Services"
+                        },
+                        {
+                            "id": "other",
+                            "title": "Other"
+                        }
+                    ]
+                },
+                "conditions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": "string"
+                            },
+                            "title": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "__example__": [
+                        {
+                            "id": "new",
+                            "title": "New"
+                        },
+                        {
+                            "id": "used_like_new",
+                            "title": "Used - Like New"
+                        },
+                        {
+                            "id": "used_good",
+                            "title": "Used - Good"
+                        },
+                        {
+                            "id": "used_fair",
+                            "title": "Used - Fair"
+                        }
+                    ]
+                }
+            },
+            "layout": {
+                "type": "SingleColumnLayout",
+                "children": [
+                    {
+                        "type": "Form",
+                        "name": "details_form",
+                        "children": [
+                            {
+                                "type": "TextSubheading",
+                                "text": "Item Details"
+                            },
+                            {
+                                "type": "Dropdown",
+                                "label": "Category",
+                                "required": true,
+                                "name": "category",
+                                "data-source": "${data.categories}"
+                            },
+                            {
+                                "type": "Dropdown",
+                                "label": "Condition",
+                                "required": true,
+                                "name": "condition",
+                                "data-source": "${data.conditions}"
+                            },
+                            {
+                                "type": "TextInput",
+                                "label": "Item Description",
+                                "name": "description",
+                                "required": true,
+                                "input-type": "text"
+                            },
+                            {
+                                "type": "Footer",
+                                "label": "Continue",
+                                "on-click-action": {
+                                    "name": "data_exchange",
+                                    "payload": {
+                                        "category": "${form.category}",
+                                        "condition": "${form.condition}",
+                                        "description": "${form.description}"
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        {
+            "id": "PRICE_INFO",
+            "title": "Price Information",
+            "data": {},
+            "layout": {
+                "type": "SingleColumnLayout",
+                "children": [
+                    {
+                        "type": "Form",
+                        "name": "price_form",
+                        "children": [
+                            {
+                                "type": "TextSubheading",
+                                "text": "Price Information"
+                            },
+                            {
+                                "type": "TextInput",
+                                "label": "Original Buying Price",
+                                "name": "buying_price",
+                                "required": true,
+                                "input-type": "number"
+                            },
+                            {
+                                "type": "TextInput",
+                                "label": "Your Selling Price",
+                                "name": "selling_price",
+                                "required": true,
+                                "input-type": "number"
+                            },
+                            {
+                                "type": "TextInput",
+                                "label": "Reason for Selling",
+                                "name": "reason_for_selling",
+                                "required": true,
+                                "input-type": "text"
+                            },
+                            {
+                                "type": "Footer",
+                                "label": "Continue",
+                                "on-click-action": {
+                                    "name": "data_exchange",
+                                    "payload": {
+                                        "buying_price": "${form.buying_price}",
+                                        "selling_price": "${form.selling_price}",
+                                        "reason_for_selling": "${form.reason_for_selling}"
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        {
+            "id": "CONTACT_INFO",
+            "title": "Contact Information",
+            "data": {},
+            "layout": {
+                "type": "SingleColumnLayout",
+                "children": [
+                    {
+                        "type": "Form",
+                        "name": "contact_form",
+                        "children": [
+                            {
+                                "type": "TextSubheading",
+                                "text": "Contact Information"
+                            },
+                            {
+                                "type": "TextInput",
+                                "label": "Your Location",
+                                "name": "location",
+                                "required": true,
+                                "input-type": "text"
+                            },
+                            {
+                                "type": "TextInput",
+                                "label": "Preferred Contact Method",
+                                "name": "contact_preference",
+                                "required": true,
+                                "input-type": "text"
+                            },
+                            {
+                                "type": "Footer",
+                                "label": "Continue",
+                                "on-click-action": {
+                                    "name": "data_exchange",
+                                    "payload": {
+                                        "location": "${form.location}",
+                                        "contact_preference": "${form.contact_preference}"
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        {
+            "id": "SUMMARY",
+            "title": "Listing Summary",
+            "data": {
+                "category": {
+                    "type": "string",
+                    "__example__": "Electronics"
+                },
+                "condition": {
+                    "type": "string",
+                    "__example__": "Used - Good"
+                },
+                "description": {
+                    "type": "string",
+                    "__example__": "iPhone 13 Pro Max in great condition"
+                },
+                "buying_price": {
+                    "type": "string",
+                    "__example__": "90000"
+                },
+                "selling_price": {
+                    "type": "string",
+                    "__example__": "65000"
+                },
+                "reason_for_selling": {
+                    "type": "string",
+                    "__example__": "Upgrading to newer model"
+                },
+                "location": {
+                    "type": "string",
+                    "__example__": "Nairobi CBD"
+                },
+                "contact_preference": {
+                    "type": "string",
+                    "__example__": "WhatsApp"
+                }
+            },
+            "layout": {
+                "type": "SingleColumnLayout",
+                "children": [
+                    {
+                        "type": "Form",
+                        "name": "summary_form",
+                        "children": [
+                            {
+                                "type": "TextSubheading",
+                                "text": "Summary of Your Listing"
+                            },
+                            {
+                                "type": "TextBody",
+                                "text": "Category",
+                                "font-weight": "bold"
+                            },
+                            {
+                                "type": "TextBody",
+                                "text": "${data.category}"
+                            },
+                            {
+                                "type": "TextBody",
+                                "text": "Condition",
+                                "font-weight": "bold"
+                            },
+                            {
+                                "type": "TextBody",
+                                "text": "${data.condition}"
+                            },
+                            {
+                                "type": "TextBody",
+                                "text": "Description",
+                                "font-weight": "bold"
+                            },
+                            {
+                                "type": "TextBody",
+                                "text": "${data.description}"
+                            },
+                            {
+                                "type": "TextBody",
+                                "text": "Buying Price",
+                                "font-weight": "bold"
+                            },
+                            {
+                                "type": "TextBody",
+                                "text": "${data.buying_price}"
+                            },
+                            {
+                                "type": "TextBody",
+                                "text": "Selling Price",
+                                "font-weight": "bold"
+                            },
+                            {
+                                "type": "TextBody",
+                                "text": "${data.selling_price}"
+                            },
+                            {
+                                "type": "TextBody",
+                                "text": "Reason for Selling",
+                                "font-weight": "bold"
+                            },
+                            {
+                                "type": "TextBody",
+                                "text": "${data.reason_for_selling}"
+                            },
+                            {
+                                "type": "TextBody",
+                                "text": "Location",
+                                "font-weight": "bold"
+                            },
+                            {
+                                "type": "TextBody",
+                                "text": "${data.location}"
+                            },
+                            {
+                                "type": "TextBody",
+                                "text": "Contact Preference",
+                                "font-weight": "bold"
+                            },
+                            {
+                                "type": "TextBody",
+                                "text": "${data.contact_preference}"
+                            },
+                            {
+                                "type": "TextBody",
+                                "text": "Photos",
+                                "font-weight": "bold"
+                            },
+                            {
+                                "type": "TextBody",
+                                "text": "You've uploaded multiple photos of your item."
+                            },
+                            {
+                                "type": "Footer",
+                                "label": "Submit Listing",
+                                "on-click-action": {
+                                    "name": "data_exchange",
+                                    "payload": {}
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        {
+            "id": "COMPLETE",
+            "title": "Listing Submitted!",
+            "data": {},
+            "terminal": true,
+            "layout": {
+                "type": "SingleColumnLayout",
+                "children": [
+                    {
+                        "type": "Form",
+                        "name": "complete_form",
+                        "children": [
+                            {
+                                "type": "TextSubheading",
+                                "text": "Listing Submitted Successfully!"
+                            },
+                            {
+                                "type": "TextBody",
+                                "text": "Thank you for submitting your listing. Please proceed to payment to publish your ad across our platforms."
+                            },
+                            {
+                                "type": "Footer",
+                                "label": "Done",
+                                "on-click-action": {
+                                    "name": "complete",
+                                    "payload": {}
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+    ]
+}

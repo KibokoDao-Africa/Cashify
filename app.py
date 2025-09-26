@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from payment import initiate_pesapal_payment, check_pesapal_payment_status
 from facebook_graph_api import upload_to_facebook, upload_to_instagram
 from bson import ObjectId
+from template_manager import template_manager
 
 app = Flask(__name__)
 
@@ -653,12 +654,16 @@ def release_escrow_payment():
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_webhook():
     current_app.logger.info("------------------------------Webhook Received------------------------------")
-    
+
     # Parse the incoming message information from Twilio's POST data
     from_number = request.form.get("From")
     incoming_text = request.form.get("Body", "").strip()
     num_media = int(request.form.get("NumMedia", "0"))
-
+    
+    # Check for interactive message response
+    button_payload = request.form.get("ButtonPayload")
+    list_reply_id = request.form.get("ListId")
+    
     # Create response object
     response = MessagingResponse()
 
@@ -668,7 +673,7 @@ def whatsapp_webhook():
 
     if incoming_text.upper() == "RESET":
         reset_session(from_number)
-        response.message("Welcome to Cashify! Please send at least 3 images or 1 video to post a new item for sale, or type SOLD to mark one of your items as sold.")
+        response.message("Welcome to Own Again! Please send at least 3 images or 1 video to post a new item for sale, or type SOLD to mark one of your items as sold.")
         return str(response)
 
     # ---------------------------------------------------------------------
@@ -777,20 +782,35 @@ def whatsapp_webhook():
                         response.message("You don't have any products that are at least 7 days old available to mark as sold.")
                         return str(response)
                     
-                    # Create a list of products for the user to choose from
-                    product_list = "Your products (7+ days old) available to mark as sold:\n\n"
+                    # Create interactive list for product selection
+                    list_items = []
                     for i, product in enumerate(products):
-                        product_list += f"{i+1}. {product['description']} - ${product['selling_price']}\n"
+                        list_items.append({
+                            "id": f"product_{i}",
+                            "title": f"{product['description'][:20]}... - ${product['selling_price']}"
+                        })
                     
-                    product_list += "\nReply with the number of the product you want to mark as sold:"
+                    content_sid = template_manager.get_or_create_list_template(
+                        template_name="product_selection_list",
+                        body="Choose which product you want to mark as sold:",
+                        items=list_items
+                    )
                     
-                    # Store products in session for reference when they select one - get fresh session for update
-                    session = get_session(from_number)
-                    session["products"] = products
-                    session["state"] = "AWAITING_PRODUCT_SELECTION"
-                    set_session(from_number, session)
-                    
-                    response.message(product_list)
+                    if content_sid:
+                        # Store products in session for reference
+                        session = get_session(from_number)
+                        session["products"] = products
+                        session["state"] = "AWAITING_PRODUCT_SELECTION"
+                        set_session(from_number, session)
+                        
+                        template_manager.send_interactive_message(from_number, content_sid)
+                    else:
+                        # Fallback to text message
+                        product_list = "Your products (7+ days old) available to mark as sold:\n\n"
+                        for i, product in enumerate(products):
+                            product_list += f"{i+1}. {product['description']} - ${product['selling_price']}\n"
+                        product_list += "\nReply with the number of the product you want to mark as sold:"
+                        response.message(product_list)
                 else:
                     # Send a welcome message
                     response.message("Hi! Please send at least 3 images or 1 video to post a new item for sale, or type SOLD to mark one of your items as sold.")
@@ -798,99 +818,217 @@ def whatsapp_webhook():
                 # Remind user to add more images
                 response.message(f"Please send {3 - current_count} more image{'s' if needed > 1 else ''} to meet the minimum requirement, or type RESET to start over.")
             else:
-                # Save incoming text as description
+                # Save incoming text as description and show category selection
                 if incoming_text:
                     session = get_session(from_number)
                     session["description"] = incoming_text
                     session["state"] = "AWAITING_CATEGORY"
                     set_session(from_number, session)
                     
-                    # Send category options
+                    # Create interactive list for categories
                     categories = ["Electronics", "Clothing", "Furniture", "Vehicles", 
                                 "Home Appliances", "Real Estate", "Services", "Other"]
-                    category_message = "Please select a category for your item by typing the number:\n\n" + \
-                                    "\n".join([f"{i+1}. {cat}" for i, cat in enumerate(categories)])
                     
-                    response.message(category_message)
+                    category_items = []
+                    for cat in categories:
+                        category_items.append({
+                            "id": f"cat_{cat.lower().replace(' ', '_')}",
+                            "title": cat
+                        })
+                    
+                    content_sid = template_manager.get_or_create_list_template(
+                        template_name="category_selection_list",
+                        body="Please select a category for your item:",
+                        items=category_items
+                    )
+                    
+                    if content_sid:
+                        template_manager.send_interactive_message(from_number, content_sid)
+                    else:
+                        # Fallback to text message
+                        category_message = "Please select a category for your item by typing the number:\n\n" + \
+                                        "\n".join([f"{i+1}. {cat}" for i, cat in enumerate(categories)])
+                        response.message(category_message)
                 else:
-                    response.message("I didn't catch that. Please send more images, or a text description for your item.")                
+                    response.message("I didn't catch that. Please send more images, or a text description for your item.")
 
     elif state == "AWAITING_PRODUCT_SELECTION":
-        try:
-            selection = int(incoming_text)
-            products = get_session(from_number).get("products", [])
-            
-            if 1 <= selection <= len(products):
-                selected_product = products[selection - 1]
-                product_id = selected_product["id"]
+        if list_reply_id:
+            # Handle interactive list response
+            try:
+                product_index = int(list_reply_id.split("_")[1])
+                products = get_session(from_number).get("products", [])
                 
-                # Mark the product as sold
-                success = mark_product_as_sold(product_id)
-                
-                if success:
-                    response.message(f"✅ Your product \"{selected_product['description']}\" has been marked as sold!")
+                if 0 <= product_index < len(products):
+                    selected_product = products[product_index]
+                    product_id = selected_product["id"]
+                    
+                    success = mark_product_as_sold(product_id)
+                    
+                    if success:
+                        response.message(f"✅ Your product \"{selected_product['description']}\" has been marked as sold!")
+                    else:
+                        response.message("❌ Sorry, we couldn't mark the product as sold. Please try again.")
+                    
+                    reset_session(from_number)
                 else:
-                    response.message("❌ Sorry, we couldn't mark the product as sold. Please try again.")
+                    response.message("Invalid selection. Please try again.")
+            except (ValueError, IndexError):
+                response.message("Invalid selection. Please try again.")
+        else:
+            # Fallback for text input
+            try:
+                selection = int(incoming_text)
+                products = get_session(from_number).get("products", [])
                 
-                reset_session(from_number)
-            else:
-                response.message(f"Please enter a valid number between 1 and {len(products)}.")
-        except ValueError:
-            response.message("Please enter a valid number.")
-        except Exception as e:
-            current_app.logger.error(f"Error marking product as sold: {str(e)}")
-            response.message("Sorry, something went wrong. Please try again.")
+                if 1 <= selection <= len(products):
+                    selected_product = products[selection - 1]
+                    product_id = selected_product["id"]
+                    
+                    success = mark_product_as_sold(product_id)
+                    
+                    if success:
+                        response.message(f"✅ Your product \"{selected_product['description']}\" has been marked as sold!")
+                    else:
+                        response.message("❌ Sorry, we couldn't mark the product as sold. Please try again.")
+                    
+                    reset_session(from_number)
+                else:
+                    response.message(f"Please enter a valid number between 1 and {len(products)}.")
+            except ValueError:
+                response.message("Please select a product from the list or enter a valid number.")
 
     elif state == "AWAITING_CATEGORY":
-        categories = ["Electronics", "Clothing", "Furniture", "Vehicles", 
-                     "Home Appliances", "Real Estate", "Services", "Other"]
-        
-        try:
-            # Handle both number input and text input
-            if incoming_text.isdigit() and 1 <= int(incoming_text) <= len(categories):
-                selected_category = categories[int(incoming_text) - 1]
-            elif incoming_text in categories:
-                selected_category = incoming_text
+        if list_reply_id:
+            # Handle interactive list response
+            category_mapping = {
+                "cat_electronics": "Electronics",
+                "cat_clothing": "Clothing", 
+                "cat_furniture": "Furniture",
+                "cat_vehicles": "Vehicles",
+                "cat_home_appliances": "Home Appliances",
+                "cat_real_estate": "Real Estate",
+                "cat_services": "Services",
+                "cat_other": "Other"
+            }
+            
+            selected_category = category_mapping.get(list_reply_id)
+            
+            if selected_category:
+                session = get_session(from_number)
+                session["category"] = selected_category
+                session["state"] = "AWAITING_CONDITION"
+                set_session(from_number, session)
+                
+                # Create interactive buttons for condition
+                condition_buttons = [
+                    {"id": "cond_new", "title": "New"},
+                    {"id": "cond_like_new", "title": "Used - Like New"},
+                    {"id": "cond_good", "title": "Used - Good"},
+                    {"id": "cond_fair", "title": "Used - Fair"}
+                ]
+                
+                content_sid = template_manager.get_or_create_list_template(
+                    template_name="condition_selection_list",
+                    body="Please select the condition of your item:",
+                    items=condition_buttons
+                )
+                
+                if content_sid:
+                    template_manager.send_interactive_message(from_number, content_sid)
+                else:
+                    # Fallback to text message
+                    conditions = ["New", "Used - Like New", "Used - Good", "Used - Fair"]
+                    condition_message = "Please select the condition by typing the number:\n\n" + \
+                                       "\n".join([f"{i+1}. {cond}" for i, cond in enumerate(conditions)])
+                    response.message(condition_message)
             else:
-                raise ValueError("Invalid category")
+                response.message("Invalid category selection. Please try again.")
+        else:
+            # Fallback for text input
+            categories = ["Electronics", "Clothing", "Furniture", "Vehicles", 
+                         "Home Appliances", "Real Estate", "Services", "Other"]
             
-            session = get_session(from_number)
-            session["category"] = selected_category
-            session["state"] = "AWAITING_CONDITION"
-            set_session(from_number, session)
-            
-            # Send condition options
-            conditions = ["New", "Used - Like New", "Used - Good", "Used - Fair"]
-            condition_message = "Please select the condition by typing the number:\n\n" + \
-                               "\n".join([f"{i+1}. {cond}" for i, cond in enumerate(conditions)])
-            
-            response.message(condition_message)
-        except:
-            category_options = "\n".join([f"{i+1}. {cat}" for i, cat in enumerate(categories)])
-            response.message(f"Please select a valid category number or name:\n\n{category_options}")
+            try:
+                if incoming_text.isdigit() and 1 <= int(incoming_text) <= len(categories):
+                    selected_category = categories[int(incoming_text) - 1]
+                elif incoming_text in categories:
+                    selected_category = incoming_text
+                else:
+                    raise ValueError("Invalid category")
+                
+                session = get_session(from_number)
+                session["category"] = selected_category
+                session["state"] = "AWAITING_CONDITION"
+                set_session(from_number, session)
+                
+                # Show condition buttons
+                condition_buttons = [
+                    {"id": "cond_new", "title": "New"},
+                    {"id": "cond_like_new", "title": "Used - Like New"},
+                    {"id": "cond_good", "title": "Used - Good"},
+                    {"id": "cond_fair", "title": "Used - Fair"}
+                ]
+                
+                content_sid = template_manager.get_or_create_list_template(
+                    template_name="condition_selection_list",
+                    body="Please select the condition of your item:",
+                    items=condition_buttons
+                )
+                
+                if content_sid:
+                    template_manager.send_interactive_message(from_number, content_sid)
+                else:
+                    conditions = ["New", "Used - Like New", "Used - Good", "Used - Fair"]
+                    condition_message = "Please select the condition by typing the number:\n\n" + \
+                                       "\n".join([f"{i+1}. {cond}" for i, cond in enumerate(conditions)])
+                    response.message(condition_message)
+            except:
+                category_options = "\n".join([f"{i+1}. {cat}" for i, cat in enumerate(categories)])
+                response.message(f"Please select a valid category:\n\n{category_options}")
     
     elif state == "AWAITING_CONDITION":
-        # Get fresh session
-        conditions = ["New", "Used - Like New", "Used - Good", "Used - Fair"]
-        
-        try:
-            # Handle both number input and text input
-            if incoming_text.isdigit() and 1 <= int(incoming_text) <= len(conditions):
-                selected_condition = conditions[int(incoming_text) - 1]
-            elif incoming_text in conditions or incoming_text.lower() in [c.lower() for c in conditions]:
-                selected_condition = incoming_text
+        if list_reply_id:
+            # Handle interactive button response
+            condition_mapping = {
+                "cond_new": "New",
+                "cond_like_new": "Used - Like New",
+                "cond_good": "Used - Good", 
+                "cond_fair": "Used - Fair"
+            }
+            
+            selected_condition = condition_mapping.get(list_reply_id)
+            
+            if selected_condition:
+                session = get_session(from_number)
+                session["condition"] = selected_condition
+                session["state"] = "AWAITING_BUYING_PRICE"
+                set_session(from_number, session)
+                
+                response.message("Please enter the buying price (numbers only):")
             else:
-                raise ValueError("Invalid condition")
+                response.message("Invalid condition selection. Please try again.")
+        else:
+            # Fallback for text input
+            conditions = ["New", "Used - Like New", "Used - Good", "Used - Fair"]
             
-            session = get_session(from_number)
-            session["condition"] = selected_condition
-            session["state"] = "AWAITING_BUYING_PRICE"
-            set_session(from_number, session)
-            
-            response.message("Please enter the buying price (numbers only):")
-        except:
-            condition_options = "\n".join([f"{i+1}. {cond}" for i, cond in enumerate(conditions)])
-            response.message(f"Please select a valid condition number or name:\n\n{condition_options}")
+            try:
+                if incoming_text.isdigit() and 1 <= int(incoming_text) <= len(conditions):
+                    selected_condition = conditions[int(incoming_text) - 1]
+                elif incoming_text in conditions or incoming_text.lower() in [c.lower() for c in conditions]:
+                    selected_condition = incoming_text
+                else:
+                    raise ValueError("Invalid condition")
+                
+                session = get_session(from_number)
+                session["condition"] = selected_condition
+                session["state"] = "AWAITING_BUYING_PRICE"
+                set_session(from_number, session)
+                
+                response.message("Please enter the buying price (numbers only):")
+            except:
+                condition_options = "\n".join([f"{i+1}. {cond}" for i, cond in enumerate(conditions)])
+                response.message(f"Please select a valid condition:\n\n{condition_options}")
     
     elif state == "AWAITING_BUYING_PRICE":        
         try:
@@ -930,7 +1068,7 @@ def whatsapp_webhook():
             response.message("Please share your location (city/town):")
         else:
             response.message("I didn't catch that. Please provide a reason for selling.")
-    
+
     elif state == "AWAITING_LOCATION":
         if incoming_text:
             session = get_session(from_number)
@@ -941,7 +1079,7 @@ def whatsapp_webhook():
             response.message("Please provide your preferred contact information for buyers (phone or email):")
         else:
             response.message("I didn't catch that. Please provide your location.")
-    
+
     elif state == "AWAITING_CONTACT":
         if incoming_text:
             session = get_session(from_number)
@@ -1014,8 +1152,8 @@ def whatsapp_webhook():
                 response.message(f"Sorry, we couldn't process your payment request: {str(e)}. Please try again.")
 
         else:
-            response.message("I didn't catch that. Please provide your contact information.")
-    
+            response.message("I didn't catch that. Please provide your preferred contact information.")
+
     elif state == "PAYMENT_INITIATED":
         response.message("We're still waiting for your payment confirmation. Please complete the M-Pesa prompt on your phone.")
 
@@ -1024,7 +1162,7 @@ def whatsapp_webhook():
         session = get_session(from_number)
         session["state"] = "INIT"
         set_session(from_number, session)
-        response.message("Welcome to Cashify! Please send me a picture to post a new item for sale, or type SOLD to mark one of your items as sold.")
+        response.message("Welcome to Own Again! Please send me a picture to post a new item for sale, or type SOLD to mark one of your items as sold.")
 
     return str(response)
 
