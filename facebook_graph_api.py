@@ -144,29 +144,29 @@ def upload_to_instagram(media_urls=None, is_video=False, caption="", story=False
                 
                 creation_id = container_data['id']
                 
-                # If it's a video, wait for processing to complete
-                if is_video:
-                    status_url = f"https://graph.facebook.com/v19.0/{creation_id}"
-                    max_retries = 30  # Wait up to 5 minutes
-                    retry_count = 0
+                # Wait for processing to complete (both video and image)
+                status_url = f"https://graph.facebook.com/v19.0/{creation_id}"
+                max_retries = 30  # Wait up to 5 minutes
+                retry_count = 0
+                
+                while retry_count < max_retries:
+                    status_response = requests.get(status_url, params={
+                        "access_token": os.getenv('INSTAGRAM_ACCESS_TOKEN'),
+                        "fields": "status_code"
+                    })
+                    status_data = status_response.json()
                     
-                    while retry_count < max_retries:
-                        status_response = requests.get(status_url, params={
-                            "access_token": os.getenv('INSTAGRAM_ACCESS_TOKEN'),
-                            "fields": "status_code"
-                        })
-                        status_data = status_response.json()
-                        
-                        if status_data.get('status_code') == 'FINISHED':
-                            break
-                        elif status_data.get('status_code') == 'ERROR':
-                            raise Exception(f"Video processing failed: {status_data}")
-                        
-                        time.sleep(10)  # Wait 10 seconds before checking again
-                        retry_count += 1
+                    if status_data.get('status_code') == 'FINISHED':
+                        break
+                    elif status_data.get('status_code') == 'ERROR':
+                        raise Exception(f"Media processing failed: {status_data}")
                     
-                    if retry_count >= max_retries:
-                        raise Exception("Video processing timeout - video is taking too long to process")
+                    time.sleep(5)  # Wait 5 seconds for images, 10 for videos
+                    retry_count += 1
+                
+                if retry_count >= max_retries:
+                    media_type = "Video" if is_video else "Image"
+                    raise Exception(f"{media_type} processing timeout - media is taking too long to process")
                 
                 # Publish the story
                 publish_params = {
@@ -212,30 +212,29 @@ def upload_to_instagram(media_urls=None, is_video=False, caption="", story=False
                 
                 creation_id = container_data['id']
                 
-                # If it's a video, wait for processing to complete
-                if is_video:
-                    status_url = f"https://graph.facebook.com/v19.0/{creation_id}"
-                    max_retries = 30  # Wait up to 5 minutes
-                    retry_count = 0
+                # Wait for processing to complete (both video and image)
+                status_url = f"https://graph.facebook.com/v19.0/{creation_id}"
+                max_retries = 30  # Wait up to 5 minutes
+                retry_count = 0
+                
+                while retry_count < max_retries:
+                    status_response = requests.get(status_url, params={
+                        "access_token": os.getenv('INSTAGRAM_ACCESS_TOKEN'),
+                        "fields": "status_code"
+                    })
+                    status_data = status_response.json()
                     
-                    while retry_count < max_retries:
-                        status_response = requests.get(status_url, params={
-                            "access_token": os.getenv('INSTAGRAM_ACCESS_TOKEN'),
-                            "fields": "status_code"
-                        })
-                        status_data = status_response.json()
-                        
-                        if status_data.get('status_code') == 'FINISHED':
-                            break
-                        elif status_data.get('status_code') == 'ERROR':
-                            # raise Exception(f"Video processing failed: {status_data}")
-                            break  # Let it raise the error later in publish step because the error message in # status_data is usually too generic
-                        
-                        time.sleep(10)  # Wait 10 seconds before checking again
-                        retry_count += 1
+                    if status_data.get('status_code') == 'FINISHED':
+                        break
+                    elif status_data.get('status_code') == 'ERROR':
+                        break  # Let it raise the error later in publish step
                     
-                    if retry_count >= max_retries:
-                        raise Exception("Video processing timeout - video is taking too long to process")
+                    time.sleep(5 if not is_video else 10)  # 5 seconds for images, 10 for videos
+                    retry_count += 1
+                
+                if retry_count >= max_retries:
+                    media_type = "Video" if is_video else "Image"
+                    raise Exception(f"{media_type} processing timeout - media is taking too long to process")
                 
                 # Publish the container
                 publish_params = {
@@ -278,6 +277,30 @@ def upload_to_instagram(media_urls=None, is_video=False, caption="", story=False
                     
                     children_ids.append(child_data['id'])
                 
+                # Wait for all carousel images to be processed
+                for child_id in children_ids:
+                    status_url = f"https://graph.facebook.com/v19.0/{child_id}"
+                    max_retries = 30
+                    retry_count = 0
+                    
+                    while retry_count < max_retries:
+                        status_response = requests.get(status_url, params={
+                            "access_token": os.getenv('INSTAGRAM_ACCESS_TOKEN'),
+                            "fields": "status_code"
+                        })
+                        status_data = status_response.json()
+                        
+                        if status_data.get('status_code') == 'FINISHED':
+                            break
+                        elif status_data.get('status_code') == 'ERROR':
+                            raise Exception(f"Carousel image processing failed: {status_data}")
+                        
+                        time.sleep(3)  # Shorter wait for carousel images
+                        retry_count += 1
+                    
+                    if retry_count >= max_retries:
+                        raise Exception("Carousel image processing timeout")
+                
                 # Create the carousel container with all children
                 carousel_container_params = {
                     "access_token": os.getenv('INSTAGRAM_ACCESS_TOKEN'),
@@ -293,6 +316,29 @@ def upload_to_instagram(media_urls=None, is_video=False, caption="", story=False
                     raise Exception(f"Failed to create carousel container: {carousel_data}")
                 
                 creation_id = carousel_data['id']
+                
+                # Wait for carousel container to be ready
+                status_url = f"https://graph.facebook.com/v19.0/{creation_id}"
+                max_retries = 30
+                retry_count = 0
+                
+                while retry_count < max_retries:
+                    status_response = requests.get(status_url, params={
+                        "access_token": os.getenv('INSTAGRAM_ACCESS_TOKEN'),
+                        "fields": "status_code"
+                    })
+                    status_data = status_response.json()
+                    
+                    if status_data.get('status_code') == 'FINISHED':
+                        break
+                    elif status_data.get('status_code') == 'ERROR':
+                        raise Exception(f"Carousel container processing failed: {status_data}")
+                    
+                    time.sleep(5)
+                    retry_count += 1
+                
+                if retry_count >= max_retries:
+                    raise Exception("Carousel container processing timeout")
                 
                 # Publish the carousel
                 publish_params = {
@@ -310,4 +356,3 @@ def upload_to_instagram(media_urls=None, is_video=False, caption="", story=False
         
     except Exception as e:
         raise e
-    
