@@ -183,7 +183,7 @@ def upload_to_instagram(media_urls=None, is_video=False, caption="", story=False
                 
                 story_ids.append(publish_data['id'])
                 
-            return story_ids
+            return ", ".join(story_ids)
         
         # For feed posts
         else:

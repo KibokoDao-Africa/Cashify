@@ -224,16 +224,14 @@ def process_social_media_uploads(user_number, media_urls, media_type, descriptio
             posting_results.append(f"Error posting to Facebook: {str(e)}")
 
         try:
-            id = upload_to_instagram(media_urls=media_urls, is_video=is_video, caption=insta_caption)
-            posting_results.append("Instagram post created with ID: " + id)
+            upload_to_instagram(media_urls=media_urls, is_video=is_video, caption=insta_caption)
+            posting_results.append(f"Instagram post created, visit https://www.instagram.com/own_again/ to view")
         except Exception as e:
             posting_results.append(f"Error posting to Instagram: {str(e)}")
             
         try:
-            # For stories, use only the first media file
-            story_media = [media_urls[0]] if media_urls else []
-            id = upload_to_instagram(media_urls=story_media, is_video=is_video, caption=story_caption, story=True)
-            posting_results.append("Instagram story created with ID: " + id)
+            upload_to_instagram(media_urls=media_urls, is_video=is_video, caption=story_caption, story=True)
+            posting_results.append(f"Instagram story(ies) created, visit https://www.instagram.com/stories/own_again/ to view")
         except Exception as e:
             posting_results.append(f"Error posting to Instagram stories: {str(e)}")
 
