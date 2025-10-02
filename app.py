@@ -210,9 +210,9 @@ def process_social_media_uploads(user_number, media_urls, media_type, descriptio
         base_caption += f"📍 Location: {location}\n"
         base_caption += f"📞 Contact: {contact}\n\n"
         
-        insta_caption = base_caption + "Contact us to purchase this item! #Cashify #ForSale"
+        insta_caption = base_caption + "Contact us to purchase this item! #OwnAgain #ForSale"
         story_caption = f"NEW ITEM: {description} - {selling_price}"
-        fb_caption = "🔥 NEW LISTING 🔥\n\n" + base_caption + "Interested? Contact us through WhatsApp! #Cashify #MarketplaceAlternative"
+        fb_caption = "🔥 NEW LISTING 🔥\n\n" + base_caption + "Interested? Contact us through WhatsApp! #OwnAgain #MarketplaceAlternative"
         
         is_video = media_type == "video"
         
@@ -240,7 +240,7 @@ def process_social_media_uploads(user_number, media_urls, media_type, descriptio
         # Send follow-up message with results
         follow_up_message = "✅ Social Media Upload Results:\n\n"
         follow_up_message += "\n".join(posting_results)
-        follow_up_message += "\n\nThank you for using Cashify!"
+        follow_up_message += "\n\nThank you for using Own Again!"
         
         # Send the follow-up message using Twilio
         client = Client(os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
@@ -659,6 +659,7 @@ def whatsapp_webhook():
     from_number = request.form.get("From")
     incoming_text = request.form.get("Body", "").strip()
     num_media = int(request.form.get("NumMedia", "0"))
+    profile_name = request.form.get("ProfileName", "")  # Get profile name from webhook
     
     # Check for interactive message response
     button_payload = request.form.get("ButtonPayload")
@@ -673,7 +674,7 @@ def whatsapp_webhook():
 
     if incoming_text.upper() == "RESET":
         reset_session(from_number)
-        response.message("Welcome to Own Again! Please send at least 3 images or 1 video to post a new item for sale, or type SOLD to mark one of your items as sold.")
+        response.message(f"Welcome back to Own Again, {profile_name}! Please send at least 3 images or 1 video to post a new item for sale, or type SOLD to mark one of your items as sold.")
         return str(response)
 
     # ---------------------------------------------------------------------
@@ -702,7 +703,7 @@ def whatsapp_webhook():
                         response.message("Sorry, I couldn't download your video. Please try again.")
                         return str(response)
                     
-                    filename = f"cashify_feed_{uuid.uuid4()}.mp4"
+                    filename = f"own_again_feed_{uuid.uuid4()}.mp4"
                     public_media_url = upload_to_s3(
                         media_response.content, 
                         filename, 
@@ -730,7 +731,7 @@ def whatsapp_webhook():
                         response.message("Sorry, I couldn't download your image. Please try again.")
                         return str(response)
                     
-                    filename = f"cashify_feed_{uuid.uuid4()}.jpg"
+                    filename = f"own_again_feed_{uuid.uuid4()}.jpg"
                     public_media_url = upload_to_s3(
                         media_response.content, 
                         filename, 
@@ -812,8 +813,8 @@ def whatsapp_webhook():
                         product_list += "\nReply with the number of the product you want to mark as sold:"
                         response.message(product_list)
                 else:
-                    # Send a welcome message
-                    response.message("Hi! Please send at least 3 images or 1 video to post a new item for sale, or type SOLD to mark one of your items as sold.")
+                    # Send a welcome message with user's name
+                    response.message(f"Hi {profile_name}! Please send at least 3 images or 1 video to post a new item for sale, or type SOLD to mark one of your items as sold.")
             elif current_count < 3 and get_session(from_number).get("media_type") == "images":
                 # Remind user to add more images
                 response.message(f"Please send {3 - current_count} more image{'s' if needed > 1 else ''} to meet the minimum requirement, or type RESET to start over.")
@@ -1113,7 +1114,7 @@ def whatsapp_webhook():
                 result = initiate_pesapal_payment(
                     ad_fee, 
                     from_number, 
-                    f"Cashify Ad Fee - {category}"
+                    f"Own Again Ad Fee - {category}"
                 )
                 
                 if result and result.get('redirect_url'):
