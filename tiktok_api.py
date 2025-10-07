@@ -2,53 +2,51 @@ import os
 import requests
 from moviepy import ImageSequenceClip
 
-def refresh_access_token():
-    """Refresh TikTok user access token using stored refresh token."""
-    client_key = os.getenv("TIKTOK_CLIENT_KEY")
-    client_secret = os.getenv("TIKTOK_CLIENT_SECRET")
-    refresh_token = os.getenv("TIKTOK_REFRESH_TOKEN")
 
-    if not all([client_key, client_secret, refresh_token]):
-        raise EnvironmentError("Missing TikTok credentials or refresh token")
-
-    url = "https://open.tiktokapis.com/v2/oauth/token/"
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    data = {
-        "client_key": client_key,
+def get_access_token_from_auth_code(auth_code, client_id, client_secret, redirect_uri):
+    """Exchange authorization code for access token"""
+    token_url = "https://open.tiktokapis.com/v2/oauth/token/"
+    
+    token_payload = {
+        "client_key": client_id,
         "client_secret": client_secret,
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token
+        "code": auth_code,
+        "grant_type": "authorization_code",
+        "redirect_uri": redirect_uri
     }
+    
+    token_headers = {
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+    
+    response = requests.post(token_url, headers=token_headers, data=token_payload)
+    response_data = response.json()
+    
+    if response.status_code == 200 and "access_token" in response_data:
+        return response_data["access_token"]
+    else:
+        raise Exception(f"Failed to get access token: {response_data}")
 
-    response = requests.post(url, headers=headers, data=data)
-    tokens = response.json()
-    if tokens.get("error", {}).get("code") != "ok":
-        raise Exception(f"Failed to refresh token: {tokens['error']['message']}")
 
-    return tokens["access_token"]
-
-def make_tiktok_request(url, headers, payload=None, method="POST", retry=True):
-    """Make a TikTok API request with auto-refresh on token failure."""
-    response = requests.request(method, url, headers=headers, json=payload)
-    result = response.json()
-
-    if result.get("error", {}).get("code") == "access_token_invalid" and retry:
-        new_token = refresh_access_token()
-        headers["Authorization"] = f"Bearer {new_token}"
-        response = requests.request(method, url, headers=headers, json=payload)
-        result = response.json()
-
-    return result
-
-def upload_to_tiktok(media_urls=None, is_video=False, caption=""):
+def upload_to_tiktok(media_urls=None, is_video=False, caption="", auth_code=None):
     try:
         media_urls = media_urls or []
         if not media_urls:
             raise ValueError("No media URLs provided")
 
-        access_token = os.getenv("TIKTOK_ACCESS_TOKEN")
-        if not access_token:
-            access_token = refresh_access_token()
+        # Get OAuth credentials from environment
+        authorization_code = auth_code or os.getenv("TIKTOK_AUTH_CODE")
+        client_id = os.getenv("TIKTOK_CLIENT_ID")
+        client_secret = os.getenv("TIKTOK_CLIENT_SECRET")
+        redirect_uri = f"{os.getenv('BASE_URL')}/tiktok/callback"
+        
+        if not all([client_id, client_secret, authorization_code]):
+            raise ValueError("Missing TikTok OAuth credentials in environment")
+        
+        # Exchange authorization code for access token
+        access_token = get_access_token_from_auth_code(
+            authorization_code, client_id, client_secret, redirect_uri
+        )
 
         # Prepare video file
         video_path = "/tmp/tiktok_upload.mp4"
@@ -87,7 +85,8 @@ def upload_to_tiktok(media_urls=None, is_video=False, caption=""):
                 "total_chunk_count": total_chunks
             }
         }
-        init_response = make_tiktok_request(init_url, init_headers, init_payload)
+        init_response = requests.request("POST", init_url, headers=init_headers, json=init_payload)
+        init_response = init_response.json()
         upload_url = init_response.get("data", {}).get("upload_url")
         publish_id = init_response.get("data", {}).get("publish_id")
         if not upload_url or not publish_id:
@@ -113,7 +112,8 @@ def upload_to_tiktok(media_urls=None, is_video=False, caption=""):
             "publish_id": publish_id,
             "text": caption
         }
-        publish_response = make_tiktok_request(publish_url, publish_headers, publish_payload)
+        publish_response = requests.request("POST", publish_url, headers=publish_headers, json=publish_payload)
+        publish_response = publish_response.json()
         
         if publish_response["error"]["code"] == "ok":
             return publish_response["data"]["video_url"]
@@ -122,3 +122,4 @@ def upload_to_tiktok(media_urls=None, is_video=False, caption=""):
 
     except Exception as e:
         raise RuntimeError(f"TikTok upload failed: {e}")
+

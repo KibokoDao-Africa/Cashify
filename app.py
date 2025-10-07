@@ -1,4 +1,4 @@
-from flask import Flask, request, current_app, jsonify
+from flask import Flask, request, current_app, jsonify, render_template
 from flask_cors import CORS
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
@@ -14,6 +14,7 @@ from payment import initiate_pesapal_payment, check_pesapal_payment_status
 from facebook_graph_api import upload_to_facebook, upload_to_instagram
 from bson import ObjectId
 from template_manager import template_manager
+import urllib.parse
 
 app = Flask(__name__)
 
@@ -43,6 +44,9 @@ s3_client = boto3.client(
     region_name=os.getenv('AWS_REGION', 'us-east-1')
 )
 S3_BUCKET = os.getenv('S3_BUCKET_NAME')
+
+# Global variable to store TikTok auth code
+tiktok_auth_code = None
 
 def initialize_default_fees():
     """
@@ -1302,6 +1306,137 @@ def pesapal_callback():
     
     # Return success response
     return "Payment completed, you may now close this window. ", 200
+
+@app.route("/tiktok/admin")
+def tiktok_admin():
+    """
+    Serve the TikTok authorization page
+    """
+    return render_template('tiktok_auth.html')
+
+@app.route("/tiktok/auth-url")
+def tiktok_auth_url():
+    """
+    Generate TikTok authorization URL with client key from environment
+    """
+    try:
+        client_key = os.getenv('TIKTOK_CLIENT_ID')
+        base_url = os.getenv('BASE_URL', 'http://localhost:5000')
+        redirect_uri = f"{base_url}/tiktok/callback"
+        
+        if not client_key:
+            return jsonify({
+                "success": False,
+                "error": "TikTok client key not configured"
+            }), 400
+        
+        # Build TikTok authorization URL
+        auth_params = {
+            "client_key": client_key,
+            "response_type": "code",
+            "scope": "video.upload",
+            "redirect_uri": redirect_uri,
+            "state": "admin_auth"
+        }
+        
+        auth_url = "https://www.tiktok.com/auth/authorize?" + urllib.parse.urlencode(auth_params)
+        
+        return jsonify({
+            "success": True,
+            "auth_url": auth_url
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"Error generating TikTok auth URL: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to generate authorization URL"
+        }), 500
+
+@app.route("/tiktok/status")
+def tiktok_status():
+    """
+    Check TikTok authorization status and return auth code if available
+    """
+    global tiktok_auth_code
+    
+    try:
+        # Check if we have auth code from either source
+        auth_code = tiktok_auth_code or os.getenv("TIKTOK_AUTH_CODE")
+        
+        return jsonify({
+            "success": True,
+            "data": {
+                "is_connected": auth_code is not None,
+                "auth_code": auth_code if auth_code else None
+            }
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"Error checking TikTok status: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to check TikTok status"
+        }), 500
+
+@app.route("/tiktok/callback")
+def tiktok_callback():
+    """
+    Handle TikTok OAuth callback and store authorization code
+    """
+    global tiktok_auth_code
+    
+    try:
+        # Get authorization code from query parameters
+        code = request.args.get('code')
+        state = request.args.get('state')
+        error = request.args.get('error')
+        
+        if error:
+            current_app.logger.error(f"TikTok authorization error: {error}")
+            return f"Authorization failed: {error}", 400
+        
+        if state != "admin_auth":
+            current_app.logger.warning(f"Invalid state parameter: {state}")
+            return "Invalid authorization state", 400
+        
+        if not code:
+            return "No authorization code received", 400
+        
+        # Store the authorization code
+        tiktok_auth_code = code
+        current_app.logger.info(f"TikTok authorization code received and stored")
+        
+        # Return success page
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>TikTok Authorization Success</title>
+            <style>
+                body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+                       margin: 0; padding: 40px; background: #f5f5f5; text-align: center; }
+                .container { background: white; border-radius: 16px; padding: 40px; 
+                           max-width: 500px; margin: 0 auto; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+                .success { color: #28a745; font-size: 3em; margin-bottom: 20px; }
+                h1 { color: #333; margin-bottom: 20px; }
+                p { color: #666; line-height: 1.6; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="success">✅</div>
+                <h1>TikTok Authorization Successful!</h1>
+                <p>Own Again now has permission to post content to TikTok on your behalf.</p>
+                <p>You can close this window and return to the admin dashboard.</p>
+            </div>
+        </body>
+        </html>
+        """
+        
+    except Exception as e:
+        current_app.logger.error(f"Error processing TikTok callback: {str(e)}")
+        return f"Error processing authorization: {str(e)}", 500
 
 if __name__ == "__main__":
     app.run(debug=True)
