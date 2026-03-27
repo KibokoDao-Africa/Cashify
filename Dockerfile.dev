@@ -9,6 +9,11 @@ ENV PYTHONUNBUFFERED 1
 # create a working directory in the container and cd into it
 WORKDIR /bot
 
+# Install ffmpeg
+RUN apt-get update && \
+    apt-get install -y ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
+
 # copy and install dependencies to working directory
 COPY requirements.txt requirements.txt
 RUN pip3 install -r requirements.txt
@@ -17,7 +22,7 @@ RUN pip3 install -r requirements.txt
 COPY . .
 
 # run the application using gunicorn
-CMD sh -c "gunicorn -b 0.0.0.0:5000 --reload app:app"
+CMD sh -c "python -m flask run --host=0.0.0.0 --port=5000 --debug"
 
 # expose the port the app runs on
 EXPOSE 5000

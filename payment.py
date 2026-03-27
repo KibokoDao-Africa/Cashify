@@ -2,6 +2,7 @@ import base64
 import os
 import requests
 import time
+import africastalking
 
 
 def setup_pesapal_callback():
@@ -51,9 +52,9 @@ def get_pesapal_token():
     else:
         raise Exception(f"Failed to get Pesapal token: {response.text}")
 
-def format_phone_for_pesapal(from_number):
+def format_phone_number(from_number):
     """
-    Format phone number for Pesapal API
+    Format phone number for payment APIs
     """
     # Strip "whatsapp:" prefix and any non-digit characters
     clean_phone = ''.join(filter(str.isdigit, from_number.replace("whatsapp:", "")))
@@ -67,12 +68,12 @@ def format_phone_for_pesapal(from_number):
     else:
         return f"+{clean_phone}"
 
-def initiate_payment(amount, phone_number, tx_desc):
+def initiate_pesapal_payment(amount, phone_number, tx_desc):
     """
-    Initiate Pesapal payment request (replaces lipa_na_mpesa)
+    Initiate Pesapal payment request
     """
     token = get_pesapal_token()
-    phone_number = format_phone_for_pesapal(phone_number)
+    phone_number = format_phone_number(phone_number)
     api_url = "https://pay.pesapal.com/v3/api/Transactions/SubmitOrderRequest"
     
     # Generate unique order ID
@@ -116,7 +117,7 @@ def initiate_payment(amount, phone_number, tx_desc):
     else:
         raise Exception(f"Payment initiation failed: {response.text}")
     
-def check_payment_status(order_tracking_id):
+def check_pesapal_payment_status(order_tracking_id):
     """
     Check payment status with Pesapal
     """
@@ -134,3 +135,86 @@ def check_payment_status(order_tracking_id):
         return response.json()
     else:
         raise Exception(f"Failed to check payment status: {response.text}")
+
+def init_africastalking():
+    """
+    Initialize Africa's Talking SDK
+    """
+    username = os.getenv('AT_USERNAME')
+    api_key = os.getenv('AT_API_KEY')
+    africastalking.initialize(username, api_key)
+    return africastalking.Payment
+
+def send_money_via_at(phone_number, amount, description="Cashify payout"):
+    """
+    B2C using Africa's Talking
+    """
+    try:
+        phone_number = format_phone_number(phone_number)
+        
+        # Initialize AT
+        payment = init_africastalking()
+        
+        result = payment.mobile_checkout(
+            product_name="Cashify",
+            phone_number=phone_number,
+            currency_code="KES",
+            amount=float(amount),
+            metadata={
+                "description": description,
+                "reference": f"CASHIFY_PAYOUT_{int(time.time())}"
+            }
+        )
+        
+        return {
+            "status": "success",
+            "data": result,
+            "message": "Payout initiated via Africa's Talking"
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Africa's Talking payout failed: {str(e)}"
+        }
+
+def check_at_transaction_status(transaction_id=None):
+    """
+    Check Africa's Talking transaction status
+    """
+    try:
+        payment = init_africastalking()
+        
+        # Get recent transactions
+        result = payment.fetch_product_transactions(
+            product_name="Cashify"
+        )
+        
+        return result
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Status check failed: {str(e)}"
+        }
+
+def get_at_wallet_balance():
+    """
+    Check Africa's Talking wallet balance
+    """
+    try:
+        payment = init_africastalking()
+        
+        result = payment.fetch_wallet_balance()
+        
+        return {
+            "status": "success",
+            "balance": result,
+            "message": "Balance retrieved successfully"
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Balance check failed: {str(e)}"
+        }

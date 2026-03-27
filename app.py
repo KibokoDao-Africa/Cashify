@@ -1,4 +1,5 @@
 from flask import Flask, request, current_app, jsonify
+from flask_cors import CORS
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
 from pymongo import MongoClient
@@ -9,19 +10,30 @@ import boto3
 import threading
 from io import BytesIO
 from datetime import datetime, timedelta
-from pesapal import initiate_payment, check_payment_status
+from payment import initiate_pesapal_payment, check_pesapal_payment_status
 from facebook_graph_api import upload_to_facebook, upload_to_instagram
 from bson import ObjectId
-from flask_cors import CORS
+from template_manager import template_manager
 
 app = Flask(__name__)
-CORS(app,resources={r"/*": {"origins": "*"}})
+
+# Configure CORS with specific settings
+CORS(app, resources={
+    r"/products*": {"origins": "*"},
+    r"/whatsapp": {"origins": "*"},
+    r"/pesapal-callback": {"origins": "*"},
+    r"/fees": {"origins": "*"},
+    r"/escrow/*": {"origins": "*"}
+})
 
 # MongoDB connection
 mongo_client = MongoClient(os.getenv("MONGODB_URI", "mongodb://localhost:27017/"))
 db = mongo_client[os.getenv("MONGODB_DATABASE", "cashify")]
 sessions_collection = db.sessions
 products_collection = db.products
+fees_collection = db.fees  # Collection for category fees
+pending_payments_collection = db.pending_payments
+escrow_payments_collection = db.escrow_payments
 
 # AWS S3 Configuration
 s3_client = boto3.client(
@@ -31,6 +43,33 @@ s3_client = boto3.client(
     region_name=os.getenv('AWS_REGION', 'us-east-1')
 )
 S3_BUCKET = os.getenv('S3_BUCKET_NAME')
+
+def initialize_default_fees():
+    """
+    Initialize default fees in MongoDB if they don't exist
+    """
+    if fees_collection.count_documents({}) == 0:
+        default_fees = {
+            "default": 400,
+            "Real Estate": 1500,
+            "Vehicles": 1500
+        }
+        fees_collection.insert_one(default_fees)
+        current_app.logger.info("Initialized default category fees")
+
+def get_fee_for_category(category):
+    """
+    Get the fee for a specific category.
+    If no fee is set for that category, return the default fee.
+    """
+    fees = fees_collection.find_one()
+    if not fees:
+        initialize_default_fees()
+        fees = fees_collection.find_one()
+    
+    # Return the category-specific fee if it exists, otherwise return default
+    return 1    # TODO: Remove this line
+    return fees.get(category, fees.get('default', 400))
 
 def upload_to_s3(file_content, filename, content_type='image/jpeg'):
     """
@@ -83,6 +122,12 @@ def set_session(user_number, session):
         {"$set": session},
         upsert=True
     )
+
+def reset_session(user_number):
+    """
+    Resets the session for the given user in MongoDB.
+    """
+    sessions_collection.delete_one({"user_number": user_number})
 
 def get_user_products(user_number, min_age_days=0):
     """
@@ -165,9 +210,9 @@ def process_social_media_uploads(user_number, media_urls, media_type, descriptio
         base_caption += f"📍 Location: {location}\n"
         base_caption += f"📞 Contact: {contact}\n\n"
         
-        insta_caption = base_caption + "Contact us to purchase this item! #Cashify #ForSale"
+        insta_caption = base_caption + "Contact us to purchase this item! #OwnAgain #ForSale"
         story_caption = f"NEW ITEM: {description} - {selling_price}"
-        fb_caption = "🔥 NEW LISTING 🔥\n\n" + base_caption + "Interested? Contact us through WhatsApp! #Cashify #MarketplaceAlternative"
+        fb_caption = "🔥 NEW LISTING 🔥\n\n" + base_caption + "Interested? Contact us through WhatsApp! #OwnAgain #MarketplaceAlternative"
         
         is_video = media_type == "video"
         
@@ -179,23 +224,21 @@ def process_social_media_uploads(user_number, media_urls, media_type, descriptio
             posting_results.append(f"Error posting to Facebook: {str(e)}")
 
         try:
-            id = upload_to_instagram(media_urls=media_urls, is_video=is_video, caption=insta_caption)
-            posting_results.append("Instagram post created with ID: " + id)
+            upload_to_instagram(media_urls=media_urls, is_video=is_video, caption=insta_caption)
+            posting_results.append(f"Instagram post created, visit https://www.instagram.com/own_again/ to view")
         except Exception as e:
             posting_results.append(f"Error posting to Instagram: {str(e)}")
             
         try:
-            # For stories, use only the first media file
-            story_media = [media_urls[0]] if media_urls else []
-            id = upload_to_instagram(media_urls=story_media, is_video=is_video, caption=story_caption, story=True)
-            posting_results.append("Instagram story created with ID: " + id)
+            upload_to_instagram(media_urls=media_urls, is_video=is_video, caption=story_caption, story=True)
+            posting_results.append(f"Instagram story(ies) created, visit https://www.instagram.com/stories/own_again/ to view")
         except Exception as e:
             posting_results.append(f"Error posting to Instagram stories: {str(e)}")
 
         # Send follow-up message with results
         follow_up_message = "✅ Social Media Upload Results:\n\n"
         follow_up_message += "\n".join(posting_results)
-        follow_up_message += "\n\nThank you for using Cashify!"
+        follow_up_message += "\n\nThank you for using Own Again!"
         
         # Send the follow-up message using Twilio
         client = Client(os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
@@ -288,8 +331,6 @@ def get_all_products():
                 "description": product["description"],
                 "media_urls": product.get("media_urls", []),
                 "media_type": product.get("media_type", "images"),
-                # Keep backward compatibility with old image_url field
-                "image_url": product.get("image_url") or (product.get("media_urls", [None])[0]),
                 "category": product.get("category", ""),
                 "condition": product.get("condition", ""),
                 "buying_price": product.get("buying_price", ""),
@@ -342,8 +383,6 @@ def get_product(product_id):
             "description": product["description"],
             "media_urls": product.get("media_urls", []),
             "media_type": product.get("media_type", "images"),
-            # Keep backward compatibility with old image_url field
-            "image_url": product.get("image_url") or (product.get("media_urls", [None])[0]),
             "category": product.get("category", ""),
             "condition": product.get("condition", ""),
             "buying_price": product.get("buying_price", ""),
@@ -368,187 +407,319 @@ def get_product(product_id):
             "error": "Failed to fetch product"
         }), 500
 
+@app.route("/fees", methods=["GET", "POST"])
+def manage_fees():
+    """
+    Endpoint to get or update category fees
+    """
+    try:
+        # Initialize fees if they don't exist
+        initialize_default_fees()
+        
+        if request.method == "GET":
+            # Return the current fee structure
+            fees = fees_collection.find_one({}, {"_id": 0})  # Exclude _id field
+            return jsonify({
+                "success": True,
+                "data": fees
+            })
+            
+        elif request.method == "POST":
+            # Update fees
+            data = request.json
+            
+            if not data or not isinstance(data, dict):
+                return jsonify({
+                    "success": False,
+                    "error": "Invalid data format. Expected dictionary of category names and fees."
+                }), 400
+            
+            # Get current fees and update with new values
+            current_fees = fees_collection.find_one({})
+            
+            # Delete _id from current fees for easy update
+            if current_fees and "_id" in current_fees:
+                current_fees_id = current_fees["_id"]
+                del current_fees["_id"]
+            else:
+                # If no fees exist, create new document
+                current_fees = {"default": 400}
+                result = fees_collection.insert_one(current_fees)
+                current_fees_id = result.inserted_id
+            
+            # Update with new fees
+            current_fees.update(data)
+            
+            # Save updated fees
+            fees_collection.update_one(
+                {"_id": current_fees_id},
+                {"$set": current_fees}
+            )
+            
+            return jsonify({
+                "success": True,
+                "message": "Fees updated successfully",
+                "data": current_fees
+            })
+            
+    except Exception as e:
+        current_app.logger.error(f"Error managing fees: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to manage fees"
+        }), 500
+    
+@app.route("/escrow/pay", methods=["POST"])
+def create_escrow_payment():
+    """
+    Endpoint for buyers to pay for an item.
+    The money will be held in escrow until the item is confirmed as received.
+    """
+    try:
+        data = request.json
+        
+        # Validate required fields
+        required_fields = ["product_id", "buyer_phone"]
+        for field in required_fields:
+            if field not in data:
+                return jsonify({"success": False, "error": f"Missing required field: {field}"}), 400
+        
+        # Get product details
+        product = products_collection.find_one({"_id": ObjectId(data["product_id"])})
+        if not product:
+            return jsonify({"success": False, "error": "Product not found"}), 404
+            
+        if product.get("sold", False) or product.get("status") == "reserved":
+            return jsonify({"success": False, "error": "Product is not available"}), 400
+            
+        # Format buyer phone number
+        from payment import format_phone_number
+        buyer_phone = format_phone_number(data["buyer_phone"])
+        
+        # Get payment amount from product
+        amount = float(product.get("selling_price", 0))
+        if amount <= 0:
+            return jsonify({"success": False, "error": "Invalid product price"}), 400
+        
+        # Create escrow payment record
+        escrow_payment = {
+            "product_id": data["product_id"],
+            "seller_number": product["user_number"],
+            "buyer_phone": buyer_phone,
+            "amount": amount,
+            "description": f"Purchase of {product['description']}",
+            "status": "pending",
+            "created_at": datetime.utcnow()
+        }
+        
+        # Insert escrow payment record
+        result = escrow_payments_collection.insert_one(escrow_payment)
+        escrow_id = str(result.inserted_id)
+        
+        # Initiate payment with Pesapal
+        from payment import initiate_pesapal_payment
+        payment_result = initiate_pesapal_payment(
+            amount, 
+            buyer_phone, 
+            f"Purchase of {product['description']}"
+        )
+        
+        if payment_result and payment_result.get('redirect_url'):
+            # Update escrow payment with Pesapal tracking details
+            escrow_payments_collection.update_one(
+                {"_id": result.inserted_id},
+                {"$set": {
+                    "order_tracking_id": payment_result.get('order_tracking_id'),
+                    "merchant_reference": payment_result.get('merchant_reference')
+                }}
+            )
+            
+            # Temporarily mark the product as reserved
+            products_collection.update_one(
+                {"_id": ObjectId(data["product_id"])},
+                {"$set": {"status": "reserved", "reserved_by": escrow_id}}
+            )
+            
+            return jsonify({
+                "success": True,
+                "data": {
+                    "escrow_id": escrow_id,
+                    "payment_url": payment_result['redirect_url'],
+                    "amount": amount
+                }
+            })
+        else:
+            # Clean up escrow record if payment initiation fails
+            escrow_payments_collection.delete_one({"_id": result.inserted_id})
+            return jsonify({
+                "success": False,
+                "error": "Payment initiation failed"
+            }), 500
+            
+    except Exception as e:
+        current_app.logger.error(f"Error creating escrow payment: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to create escrow payment"
+        }), 500
+
+@app.route("/escrow/release", methods=["POST"])
+def release_escrow_payment():
+    """
+    Endpoint to release funds to a seller after confirming that 
+    the buyer has received the item.
+    """
+    try:
+        data = request.json
+        
+        # Validate required fields
+        if "escrow_id" not in data:
+            return jsonify({"success": False, "error": "Missing escrow_id"}), 400
+        
+        # Get escrow payment details
+        escrow_payment = escrow_payments_collection.find_one({"_id": ObjectId(data["escrow_id"])})
+        if not escrow_payment:
+            return jsonify({"success": False, "error": "Escrow payment not found"}), 404
+            
+        # Check if payment is already processed
+        if escrow_payment.get("status") == "released":
+            return jsonify({"success": False, "error": "Payment has already been released"}), 400
+        
+        # Check if payment is confirmed
+        if escrow_payment.get("status") != "paid":
+            return jsonify({"success": False, "error": "Payment is not confirmed yet"}), 400
+            
+        # Get product details
+        product = products_collection.find_one({"_id": ObjectId(escrow_payment["product_id"])})
+        if not product:
+            return jsonify({"success": False, "error": "Associated product not found"}), 404
+        
+        # Send money to seller using AfricasTalking
+        from payment import send_money_via_at
+        seller_phone = product["user_number"]
+        amount = escrow_payment["amount"]
+        
+        payment_result = send_money_via_at(
+            seller_phone,
+            amount,
+            f"Payment for {product['description']}"
+        )
+
+        current_app.logger.info(f"AfricasTalking payment result: {payment_result}")
+        
+        if payment_result and payment_result.get("status") == "success":
+            # Update escrow payment status
+            escrow_payments_collection.update_one(
+                {"_id": ObjectId(data["escrow_id"])},
+                {"$set": {
+                    "status": "released",
+                    "released_at": datetime.utcnow(),
+                    "payment_reference": payment_result.get("data", {}).get("transactionId")
+                }}
+            )
+            
+            # Mark product as sold
+            products_collection.update_one(
+                {"_id": ObjectId(escrow_payment["product_id"])},
+                {"$set": {
+                    "status": "sold",
+                    "sold": True,
+                    "sold_at": datetime.utcnow(),
+                    "sold_to": escrow_payment.get("buyer_phone")
+                }}
+            )
+            
+            return jsonify({
+                "success": True,
+                "data": {
+                    "message": "Payment released to seller",
+                    "transaction_id": payment_result.get("data", {}).get("transactionId")
+                }
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "error": "Failed to release payment"
+            }), 500
+            
+    except Exception as e:
+        current_app.logger.error(f"Error releasing escrow payment: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to release escrow payment"
+        }), 500
+
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_webhook():
     current_app.logger.info("------------------------------Webhook Received------------------------------")
-    
+
     # Parse the incoming message information from Twilio's POST data
     from_number = request.form.get("From")
     incoming_text = request.form.get("Body", "").strip()
     num_media = int(request.form.get("NumMedia", "0"))
-
-    # Retrieve or initialize a session for this user via MongoDB
-    session = get_session(from_number)
-    state = session.get("state", "INIT")
-
+    profile_name = request.form.get("ProfileName", "")  # Get profile name from webhook
+    
+    # Check for interactive message response
+    button_payload = request.form.get("ButtonPayload")
+    list_reply_id = request.form.get("ListId")
+    
+    # Create response object
     response = MessagingResponse()
-    current_app.logger.info(f"User {from_number} in state '{state}' sent message: {incoming_text}")
 
     # ---------------------------------------------------------------------
     # Reset Conversation
     # ---------------------------------------------------------------------
 
     if incoming_text.upper() == "RESET":
-        session["state"] = "INIT"
-        session.pop("media_urls", None)
-        session.pop("media_type", None)
-        session.pop("description", None)
-        session.pop("category", None)
-        session.pop("condition", None)
-        session.pop("buying_price", None)
-        session.pop("selling_price", None)
-        session.pop("reason_for_selling", None)
-        session.pop("location", None)
-        session.pop("contact", None)
-        session.pop("payment_amount", None)
-        session.pop("transaction_id", None)
-        session.pop("products", None)
-        
-        # Check if user has products older than 7 days before mentioning SOLD option
-        old_products = get_user_products(from_number, min_age_days=7)
-        if old_products:
-            response.message("Welcome to Cashify! Please send me up to 3 images or 1 video to post a new item for sale, or type SOLD to mark one of your items as sold.")
-        else:
-            response.message("Welcome to Cashify! Please send me up to 3 images or 1 video to post a new item for sale.")
-            
-        set_session(from_number, session)
+        reset_session(from_number)
+        response.message(f"Welcome back to Own Again, {profile_name}! Please send at least 3 images or 1 video to post a new item for sale, or type SOLD to mark one of your items as sold.")
         return str(response)
 
     # ---------------------------------------------------------------------
     # Conversation Flow
     # ---------------------------------------------------------------------
 
+    state = get_session(from_number).get("state", "INIT")
+    current_app.logger.info(f"User {from_number} in state '{state}' sent message: {incoming_text}")
+
     if state == "INIT":
-        if incoming_text.upper() == "SOLD":
-            # User wants to mark a product as sold - only show products 7+ days old
-            products = get_user_products(from_number, min_age_days=7)
-            
-            if not products:
-                response.message("You don't have any products that are at least 7 days old available to mark as sold.")
-                return str(response)
-            
-            # Create a list of products for the user to choose from
-            product_list = "Your products (7+ days old) available to mark as sold:\n\n"
-            for i, product in enumerate(products):
-                product_list += f"{i+1}. {product['description']} - ${product['selling_price']}\n"
-            
-            product_list += "\nReply with the number of the product you want to mark as sold:"
-            
-            # Store products in session for reference when they select one
-            session["products"] = products
-            session["state"] = "AWAITING_PRODUCT_SELECTION"
-            set_session(from_number, session)
-            
-            response.message(product_list)
-        
-        elif num_media > 0:
-            # User has sent media files
-            if num_media > 3:
-                response.message("Please send up to 3 images or 1 video only.")
-                return str(response)
-            
-            try:
-                media_urls = []
-                media_type = None
+        # User has sent media
+        if num_media > 0:
+            content_type = request.form.get("MediaContentType0", "")
+            is_video = content_type.startswith("video/")
+            is_image = content_type.startswith("image/")
                 
-                # Process all media files
-                for i in range(num_media):
-                    twilio_media_url = request.form.get(f"MediaUrl{i}")
-                    content_type = request.form.get(f"MediaContentType{i}", "")
+            if is_video:
+                # Process the video
+                    twilio_media_url = request.form.get("MediaUrl0")
                     
-                    # Determine if it's a video or image
-                    is_video = content_type.startswith("video/")
-                    is_image = content_type.startswith("image/")
-                    
-                    if not is_video and not is_image:
-                        response.message("Please send only images or videos.")
-                        return str(response)
-                    
-                    # Check for mixed media types
-                    if media_type is None:
-                        media_type = "video" if is_video else "images"
-                    elif (media_type == "video" and is_image) or (media_type == "images" and is_video):
-                        response.message("Please send either images OR video, not both.")
-                        return str(response)
-                    
-                    # For video, only allow one file
-                    if is_video and num_media > 1:
-                        response.message("Please send only 1 video file.")
-                        return str(response)
-                    
-                    # Download the media from Twilio with auth
+                    # Download and upload to S3
                     auth = (os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
                     media_response = requests.get(twilio_media_url, auth=auth)
-
-                    current_app.logger.info(f"Media response: {media_response}")
                     
                     if media_response.status_code != 200:
-                        response.message("Sorry, I couldn't download your media. Please try again.")
+                        response.message("Sorry, I couldn't download your video. Please try again.")
                         return str(response)
                     
-                    # Generate a unique filename for S3
-                    extension = "mp4" if is_video else "jpg"
-                    filename = f"cashify_feed_{uuid.uuid4()}.{extension}"
-                    
-                    # Upload the media to S3 bucket
+                    filename = f"own_again_feed_{uuid.uuid4()}.mp4"
                     public_media_url = upload_to_s3(
                         media_response.content, 
                         filename, 
                         content_type=content_type
                     )
                     
-                    media_urls.append(public_media_url)
-                    current_app.logger.info(f"Media uploaded to S3. Public URL: {public_media_url}")
-                
-                session["media_urls"] = media_urls
-                session["media_type"] = media_type
-                session["state"] = "AWAITING_DESCRIPTION"
-                set_session(from_number, session)
-                
-                media_count_text = f"{len(media_urls)} {'image' if media_type == 'images' else 'video'}{'s' if len(media_urls) > 1 else ''}"
-                response.message(f"Great! I received your {media_count_text}. Please enter a description for your item.")
-                
-            except Exception as e:
-                current_app.logger.error(f"Error processing media: {str(e)}")
-                response.message("Sorry, I couldn't process your media. Could you please try sending it again?")
-        
-        elif incoming_text.lower() == "add more" and session.get("media_urls"):
-            # User wants to add more images (only if they already have images)
-            current_media = session.get("media_urls", [])
-            if session.get("media_type") == "video":
-                response.message("You already uploaded a video. Please type RESET to start over with new media.")
-            elif len(current_media) >= 3:
-                response.message("You already have 3 images. Please type RESET to start over with new media.")
-            else:
-                remaining = 3 - len(current_media)
-                response.message(f"Please send up to {remaining} more image{'s' if remaining > 1 else ''}.")
-                session["state"] = "AWAITING_MORE_MEDIA"
-                set_session(from_number, session)
-        else:
-            # Check if user has products older than 7 days before mentioning SOLD option
-            old_products = get_user_products(from_number, min_age_days=7)
-            if old_products:
-                response.message("Hi! Send me up to 3 images or 1 video to post a new item for sale, or type SOLD to mark one of your items as sold.")
-            else:
-                response.message("Hi! Send me up to 3 images or 1 video to post a new item for sale.")
-
-    elif state == "AWAITING_MORE_MEDIA":
-        if num_media > 0:
-            current_media = session.get("media_urls", [])
-            
-            if len(current_media) + num_media > 3:
-                response.message(f"You can only add {3 - len(current_media)} more image{'s' if 3 - len(current_media) > 1 else ''}.")
-                return str(response)
-            
-            try:
-                # Process additional media files
-                for i in range(num_media):
-                    twilio_media_url = request.form.get(f"MediaUrl{i}")
-                    content_type = request.form.get(f"MediaContentType{i}", "")
+                    # Store video (Overwrite existing media because only 1 video allowed)
+                    session = get_session(from_number)
+                    session["media_urls"] = [public_media_url]
+                    session["media_type"] = "video"
+                    set_session(from_number, session)
                     
-                    if not content_type.startswith("image/"):
-                        response.message("Please send only images when adding more media.")
-                        return str(response)
+                    response.message("Great! I received your video. Please enter a description for your item.")
+            
+            elif is_image:
+                try:
+                    # Process the new image
+                    twilio_media_url = request.form.get("MediaUrl0")
                     
                     # Download and upload to S3
                     auth = (os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
@@ -558,74 +729,359 @@ def whatsapp_webhook():
                         response.message("Sorry, I couldn't download your image. Please try again.")
                         return str(response)
                     
-                    filename = f"cashify_feed_{uuid.uuid4()}.jpg"
+                    filename = f"own_again_feed_{uuid.uuid4()}.jpg"
                     public_media_url = upload_to_s3(
                         media_response.content, 
                         filename, 
                         content_type=content_type
                     )
                     
-                    current_media.append(public_media_url)
-                
-                session["media_urls"] = current_media
-                session["state"] = "AWAITING_DESCRIPTION"
-                set_session(from_number, session)
-                
-                response.message(f"Great! I now have {len(current_media)} images. Please enter a description for your item.")
-                
-            except Exception as e:
-                current_app.logger.error(f"Error processing additional media: {str(e)}")
-                response.message("Sorry, I couldn't process your images. Please try again.")
+                    # Save the image in the user session
+                    session = get_session(from_number)
+
+                    current_app.logger.info(f"Current session before adding image: {session}. Media url: {public_media_url}")
+
+                    media_urls = session.get("media_urls", [])
+                    media_type = session.get("media_type", "images")
+
+                    if media_type == "video":
+                        # Previously a video was sent but now it's an image. Which means we start over
+                        media_urls = [public_media_url]
+                    else:
+                        # Append the image to the previously sent images
+                        media_urls.append(public_media_url)
+
+                    session["media_urls"] = media_urls
+                    session["media_type"] = "images"
+                    set_session(from_number, session)
+
+                    if len(media_urls) < 3:
+                        response.message(f"Image {len(media_urls)}/3+ processed successfully")
+                    else:
+                        response.message(f"Image {len(media_urls)}/3+ processed successfully. You may now upload more images or enter a description of your item.")
+
+                except Exception as e:
+                    current_app.logger.error(f"Error processing image: {str(e)}")
+                    response.message("Sorry, I couldn't process your image. Please try again.")
+        
+            else:
+                response.message("Please send only images or a video.")
+                return str(response)
+        
+        # User has sent text
         else:
-            response.message("Please send the additional images, or type CONTINUE to proceed with your current images.")
+            current_count = len(get_session(from_number).get("media_urls", []))
+            needed = 3 - current_count
+
+            if current_count == 0:
+                # If the user wants to mark a product as sold:
+                if incoming_text and incoming_text.upper() == "SOLD":
+                    products = get_user_products(from_number, min_age_days=7)
+                    if not products:
+                        response.message("You don't have any products that are at least 7 days old available to mark as sold.")
+                        return str(response)
+                    
+                    # Create interactive list for product selection
+                    list_items = []
+                    for i, product in enumerate(products):
+                        list_items.append({
+                            "id": f"product_{i}",
+                            "title": f"{product['description'][:20]}... - ${product['selling_price']}"
+                        })
+                    
+                    content_sid = template_manager.get_or_create_list_template(
+                        template_name="product_selection_list",
+                        body="Choose which product you want to mark as sold:",
+                        items=list_items
+                    )
+                    
+                    if content_sid:
+                        # Store products in session for reference
+                        session = get_session(from_number)
+                        session["products"] = products
+                        session["state"] = "AWAITING_PRODUCT_SELECTION"
+                        set_session(from_number, session)
+                        
+                        template_manager.send_interactive_message(from_number, content_sid)
+                    else:
+                        # Fallback to text message
+                        product_list = "Your products (7+ days old) available to mark as sold:\n\n"
+                        for i, product in enumerate(products):
+                            product_list += f"{i+1}. {product['description']} - ${product['selling_price']}\n"
+                        product_list += "\nReply with the number of the product you want to mark as sold:"
+                        response.message(product_list)
+                else:
+                    # Send a welcome message with user's name
+                    response.message(f"Hi {profile_name}! Please send at least 3 images or 1 video to post a new item for sale, or type SOLD to mark one of your items as sold.")
+            elif current_count < 3 and get_session(from_number).get("media_type") == "images":
+                # Remind user to add more images
+                response.message(f"Please send {3 - current_count} more image{'s' if needed > 1 else ''} to meet the minimum requirement, or type RESET to start over.")
+            else:
+                # Save incoming text as description and show category selection
+                if incoming_text:
+                    session = get_session(from_number)
+                    session["description"] = incoming_text
+                    session["state"] = "AWAITING_CATEGORY"
+                    set_session(from_number, session)
+                    
+                    # Create interactive list for categories
+                    categories = ["Electronics", "Clothing", "Furniture", "Vehicles", 
+                                "Home Appliances", "Real Estate", "Services", "Other"]
+                    
+                    category_items = []
+                    for cat in categories:
+                        category_items.append({
+                            "id": f"cat_{cat.lower().replace(' ', '_')}",
+                            "title": cat
+                        })
+                    
+                    content_sid = template_manager.get_or_create_list_template(
+                        template_name="category_selection_list",
+                        body="Please select a category for your item:",
+                        items=category_items
+                    )
+                    
+                    if content_sid:
+                        template_manager.send_interactive_message(from_number, content_sid)
+                    else:
+                        # Fallback to text message
+                        category_message = "Please select a category for your item by typing the number:\n\n" + \
+                                        "\n".join([f"{i+1}. {cat}" for i, cat in enumerate(categories)])
+                        response.message(category_message)
+                else:
+                    response.message("I didn't catch that. Please send more images, or a text description for your item.")
 
     elif state == "AWAITING_PRODUCT_SELECTION":
-        try:
-            selection = int(incoming_text)
-            products = session.get("products", [])
-            
-            if 1 <= selection <= len(products):
-                selected_product = products[selection - 1]
-                product_id = selected_product["id"]
+        if list_reply_id:
+            # Handle interactive list response
+            try:
+                product_index = int(list_reply_id.split("_")[1])
+                products = get_session(from_number).get("products", [])
                 
-                # Mark the product as sold
-                success = mark_product_as_sold(product_id)
-                
-                if success:
-                    response.message(f"✅ Your product \"{selected_product['description']}\" has been marked as sold!")
+                if 0 <= product_index < len(products):
+                    selected_product = products[product_index]
+                    product_id = selected_product["id"]
+                    
+                    success = mark_product_as_sold(product_id)
+                    
+                    if success:
+                        response.message(f"✅ Your product \"{selected_product['description']}\" has been marked as sold!")
+                    else:
+                        response.message("❌ Sorry, we couldn't mark the product as sold. Please try again.")
+                    
+                    reset_session(from_number)
                 else:
-                    response.message("❌ Sorry, we couldn't mark the product as sold. Please try again.")
+                    response.message("Invalid selection. Please try again.")
+            except (ValueError, IndexError):
+                response.message("Invalid selection. Please try again.")
+        else:
+            # Fallback for text input
+            try:
+                selection = int(incoming_text)
+                products = get_session(from_number).get("products", [])
                 
-                # Reset session
-                session["state"] = "INIT"
-                session.pop("products", None)
-                set_session(from_number, session)
-            else:
-                response.message(f"Please enter a valid number between 1 and {len(products)}.")
-        except ValueError:
-            response.message("Please enter a valid number.")
-        except Exception as e:
-            current_app.logger.error(f"Error marking product as sold: {str(e)}")
-            response.message("Sorry, something went wrong. Please try again.")
+                if 1 <= selection <= len(products):
+                    selected_product = products[selection - 1]
+                    product_id = selected_product["id"]
+                    
+                    success = mark_product_as_sold(product_id)
+                    
+                    if success:
+                        response.message(f"✅ Your product \"{selected_product['description']}\" has been marked as sold!")
+                    else:
+                        response.message("❌ Sorry, we couldn't mark the product as sold. Please try again.")
+                    
+                    reset_session(from_number)
+                else:
+                    response.message(f"Please enter a valid number between 1 and {len(products)}.")
+            except ValueError:
+                response.message("Please select a product from the list or enter a valid number.")
 
-    elif state == "AWAITING_DESCRIPTION":
-        if incoming_text:
-            session["description"] = incoming_text
-            session["state"] = "AWAITING_CATEGORY"
-            set_session(from_number, session)
+    elif state == "AWAITING_CATEGORY":
+        if list_reply_id:
+            # Handle interactive list response
+            category_mapping = {
+                "cat_electronics": "Electronics",
+                "cat_clothing": "Clothing", 
+                "cat_furniture": "Furniture",
+                "cat_vehicles": "Vehicles",
+                "cat_home_appliances": "Home Appliances",
+                "cat_real_estate": "Real Estate",
+                "cat_services": "Services",
+                "cat_other": "Other"
+            }
             
-            # Send category options
+            selected_category = category_mapping.get(list_reply_id)
+            
+            if selected_category:
+                session = get_session(from_number)
+                session["category"] = selected_category
+                session["state"] = "AWAITING_CONDITION"
+                set_session(from_number, session)
+                
+                # Create interactive buttons for condition
+                condition_buttons = [
+                    {"id": "cond_new", "title": "New"},
+                    {"id": "cond_like_new", "title": "Used - Like New"},
+                    {"id": "cond_good", "title": "Used - Good"},
+                    {"id": "cond_fair", "title": "Used - Fair"}
+                ]
+                
+                content_sid = template_manager.get_or_create_list_template(
+                    template_name="condition_selection_list",
+                    body="Please select the condition of your item:",
+                    items=condition_buttons
+                )
+                
+                if content_sid:
+                    template_manager.send_interactive_message(from_number, content_sid)
+                else:
+                    # Fallback to text message
+                    conditions = ["New", "Used - Like New", "Used - Good", "Used - Fair"]
+                    condition_message = "Please select the condition by typing the number:\n\n" + \
+                                       "\n".join([f"{i+1}. {cond}" for i, cond in enumerate(conditions)])
+                    response.message(condition_message)
+            else:
+                response.message("Invalid category selection. Please try again.")
+        else:
+            # Fallback for text input
             categories = ["Electronics", "Clothing", "Furniture", "Vehicles", 
                          "Home Appliances", "Real Estate", "Services", "Other"]
-            category_message = "Please select a category for your item by typing the number:\n\n" + \
-                               "\n".join([f"{i+1}. {cat}" for i, cat in enumerate(categories)])
             
-            response.message(category_message)
+            try:
+                if incoming_text.isdigit() and 1 <= int(incoming_text) <= len(categories):
+                    selected_category = categories[int(incoming_text) - 1]
+                elif incoming_text in categories:
+                    selected_category = incoming_text
+                else:
+                    raise ValueError("Invalid category")
+                
+                session = get_session(from_number)
+                session["category"] = selected_category
+                session["state"] = "AWAITING_CONDITION"
+                set_session(from_number, session)
+                
+                # Show condition buttons
+                condition_buttons = [
+                    {"id": "cond_new", "title": "New"},
+                    {"id": "cond_like_new", "title": "Used - Like New"},
+                    {"id": "cond_good", "title": "Used - Good"},
+                    {"id": "cond_fair", "title": "Used - Fair"}
+                ]
+                
+                content_sid = template_manager.get_or_create_list_template(
+                    template_name="condition_selection_list",
+                    body="Please select the condition of your item:",
+                    items=condition_buttons
+                )
+                
+                if content_sid:
+                    template_manager.send_interactive_message(from_number, content_sid)
+                else:
+                    conditions = ["New", "Used - Like New", "Used - Good", "Used - Fair"]
+                    condition_message = "Please select the condition by typing the number:\n\n" + \
+                                       "\n".join([f"{i+1}. {cond}" for i, cond in enumerate(conditions)])
+                    response.message(condition_message)
+            except:
+                category_options = "\n".join([f"{i+1}. {cat}" for i, cat in enumerate(categories)])
+                response.message(f"Please select a valid category:\n\n{category_options}")
+    
+    elif state == "AWAITING_CONDITION":
+        if list_reply_id:
+            # Handle interactive button response
+            condition_mapping = {
+                "cond_new": "New",
+                "cond_like_new": "Used - Like New",
+                "cond_good": "Used - Good", 
+                "cond_fair": "Used - Fair"
+            }
+            
+            selected_condition = condition_mapping.get(list_reply_id)
+            
+            if selected_condition:
+                session = get_session(from_number)
+                session["condition"] = selected_condition
+                session["state"] = "AWAITING_BUYING_PRICE"
+                set_session(from_number, session)
+                
+                response.message("Please enter the buying price (numbers only):")
+            else:
+                response.message("Invalid condition selection. Please try again.")
         else:
-            response.message("I didn't catch that. Please send me a text description for your item.")
+            # Fallback for text input
+            conditions = ["New", "Used - Like New", "Used - Good", "Used - Fair"]
+            
+            try:
+                if incoming_text.isdigit() and 1 <= int(incoming_text) <= len(conditions):
+                    selected_condition = conditions[int(incoming_text) - 1]
+                elif incoming_text in conditions or incoming_text.lower() in [c.lower() for c in conditions]:
+                    selected_condition = incoming_text
+                else:
+                    raise ValueError("Invalid condition")
+                
+                session = get_session(from_number)
+                session["condition"] = selected_condition
+                session["state"] = "AWAITING_BUYING_PRICE"
+                set_session(from_number, session)
+                
+                response.message("Please enter the buying price (numbers only):")
+            except:
+                condition_options = "\n".join([f"{i+1}. {cond}" for i, cond in enumerate(conditions)])
+                response.message(f"Please select a valid condition:\n\n{condition_options}")
+    
+    elif state == "AWAITING_BUYING_PRICE":        
+        try:
+            # Validate it's a number (can be float)
+            buying_price = float(incoming_text.replace(',', ''))
+            
+            session = get_session(from_number)
+            session["buying_price"] = buying_price
+            session["state"] = "AWAITING_SELLING_PRICE"
+            set_session(from_number, session)
+            
+            response.message("Please enter your selling price (numbers only):")
+        except:
+            response.message("Please enter a valid buying price (numbers only):")
+    
+    elif state == "AWAITING_SELLING_PRICE":
+        try:
+            # Validate it's a number (can be float)
+            selling_price = float(incoming_text.replace(',', ''))
+            
+            session = get_session(from_number)
+            session["selling_price"] = selling_price
+            session["state"] = "AWAITING_REASON"
+            set_session(from_number, session)
+            
+            response.message("Please provide a brief reason for selling:")
+        except:
+            response.message("Please enter a valid selling price (numbers only):")
+    
+    elif state == "AWAITING_REASON":
+        if incoming_text:
+            session = get_session(from_number)
+            session["reason_for_selling"] = incoming_text
+            session["state"] = "AWAITING_LOCATION"
+            set_session(from_number, session)
+            
+            response.message("Please share your location (city/town):")
+        else:
+            response.message("I didn't catch that. Please provide a reason for selling.")
+
+    elif state == "AWAITING_LOCATION":
+        if incoming_text:
+            session = get_session(from_number)
+            session["location"] = incoming_text
+            session["state"] = "AWAITING_CONTACT"
+            set_session(from_number, session)
+            
+            response.message("Please provide your preferred contact information for buyers (phone or email):")
+        else:
+            response.message("I didn't catch that. Please provide your location.")
 
     elif state == "AWAITING_CONTACT":
         if incoming_text:
+            session = get_session(from_number)
             session["contact"] = incoming_text
             session["state"] = "AWAITING_PAYMENT"
             set_session(from_number, session)
@@ -648,78 +1104,64 @@ def whatsapp_webhook():
             response.message(summary)
 
             try:
-                # Initiate Pesapal payment with amount 1 KES
-                result = initiate_payment(1, from_number, "Cashify Ad Fee")
+                # Get the appropriate fee based on category
+                category = session.get('category', '')
+                ad_fee = get_fee_for_category(category)
                 
-                if success:
+                # Initiate Pesapal payment with the correct fee
+                result = initiate_pesapal_payment(
+                    ad_fee, 
+                    from_number, 
+                    f"Own Again Ad Fee - {category}"
+                )
+                
+                if result and result.get('redirect_url'):
                     # Store pending payment for callback tracking
                     pending_payment = {
                         "user_number": from_number,
                         "order_tracking_id": result.get('order_tracking_id'),
                         "merchant_reference": result.get('merchant_reference'),
-                        "created_at": datetime.now(datetime.timezone.utc),
+                        "created_at": datetime.utcnow(),
                         "status": "pending"
                     }
                     
                     # Store in a separate collection for tracking
-                    db.pending_payments.insert_one(pending_payment)
+                    pending_payments_collection.insert_one(pending_payment)
                     
                     # Update session state
+                    session = get_session(from_number)
                     session["state"] = "PAYMENT_INITIATED"
-                    session["payment_amount"] = 1
+                    session["payment_amount"] = ad_fee
                     session["order_tracking_id"] = result.get('order_tracking_id')
+                    set_session(from_number, session)
                     
-                    payment_message = f"Please complete your payment by visiting: {result['redirect_url']}\n\n"
+                    # Format fee with comma for thousands
+                    formatted_fee = "{:,}".format(ad_fee)
+                    
+                    payment_message = f"Your ad fee is KES {formatted_fee}. Please complete your payment by visiting: {result['redirect_url']}\n\n"
                     payment_message += "We'll notify you once payment is confirmed."
                     
                     response.message(payment_message)
                 else:
+                    reset_session(from_number)
                     response.message(f"Sorry, we couldn't process your payment request: {result}. Please try again.")
-                    # reset session
-                    session["state"] = "INIT"
-                    session.pop("media_urls", None)
-                    session.pop("media_type", None)
-                    session.pop("description", None)
-                    session.pop("category", None)
-                    session.pop("condition", None)
-                    session.pop("buying_price", None)
-                    session.pop("selling_price", None)
-                    session.pop("reason_for_selling", None)
-                    session.pop("location", None)
-                    session.pop("contact", None)
-                    session.pop("payment_amount", None)
-                    session.pop("transaction_id", None)
-                    set_session(from_number, session)
-                    
+
             except Exception as e:
+                reset_session(from_number)
                 response.message(f"Sorry, we couldn't process your payment request: {str(e)}. Please try again.")
-                # reset session
-                session["state"] = "INIT"
-                session.pop("media_urls", None)
-                session.pop("media_type", None)
-                session.pop("description", None)
-                session.pop("category", None)
-                session.pop("condition", None)
-                session.pop("buying_price", None)
-                session.pop("selling_price", None)
-                session.pop("reason_for_selling", None)
-                session.pop("location", None)
-                session.pop("contact", None)
-                session.pop("payment_amount", None)
-                session.pop("transaction_id", None)
-                set_session(from_number, session)
 
         else:
-            response.message("I didn't catch that. Please provide your contact information.")
-    
+            response.message("I didn't catch that. Please provide your preferred contact information.")
+
     elif state == "PAYMENT_INITIATED":
         response.message("We're still waiting for your payment confirmation. Please complete the M-Pesa prompt on your phone.")
 
     else:
         # Default case
+        session = get_session(from_number)
         session["state"] = "INIT"
         set_session(from_number, session)
-        response.message("Welcome to Cashify! Please send me a picture to post a new item for sale, or type SOLD to mark one of your items as sold.")
+        response.message("Welcome to Own Again! Please send me a picture to post a new item for sale, or type SOLD to mark one of your items as sold.")
 
     return str(response)
 
@@ -741,7 +1183,7 @@ def pesapal_callback():
             # Since we don't get phone number directly from Pesapal, 
             # we need to find the user by checking sessions
             user_number = None
-            pending_payment = db.pending_payments.find_one({"order_tracking_id": order_tracking_id})
+            pending_payment = pending_payments_collection.find_one({"order_tracking_id": order_tracking_id})
             if pending_payment:
                 user_number = pending_payment["user_number"]
             
@@ -749,13 +1191,27 @@ def pesapal_callback():
             
             if order_tracking_id:
                 # Check payment status with Pesapal
-                payment_status = check_payment_status(order_tracking_id)
+                payment_status = check_pesapal_payment_status(order_tracking_id)
                 current_app.logger.info(f"Payment status: {payment_status}")
                 
                 # Check if payment was successful
                 if payment_status.get('payment_status_description') == 'Completed':
                     current_app.logger.info("Payment successful!")
+
+                    # Check if this is an escrow payment
+                    escrow_payment = db.escrow_payments.find_one({"order_tracking_id": order_tracking_id})
                     
+                    if escrow_payment:
+                        # Update escrow payment status
+                        db.escrow_payments.update_one(
+                            {"_id": escrow_payment["_id"]},
+                            {"$set": {
+                                "status": "paid",
+                                "paid_at": datetime.utcnow(),
+                                "payment_details": payment_status
+                            }}
+                        )
+
                     if user_number:
                         current_app.logger.info(f"Payment received from user: {user_number}")
                         
@@ -813,23 +1269,10 @@ def pesapal_callback():
                             upload_thread.start()
                             
                             # reset session
-                            session["state"] = "INIT"
-                            session.pop("media_urls", None)
-                            session.pop("media_type", None)
-                            session.pop("description", None)
-                            session.pop("category", None)
-                            session.pop("condition", None)
-                            session.pop("buying_price", None)
-                            session.pop("selling_price", None)
-                            session.pop("reason_for_selling", None)
-                            session.pop("location", None)
-                            session.pop("contact", None)
-                            session.pop("payment_amount", None)
-                            session.pop("transaction_id", None)
-                            set_session(user_number, session)
+                            reset_session(user_number)
                             
                             # Clean up pending payment record
-                            db.pending_payments.delete_one({"order_tracking_id": order_tracking_id})
+                            pending_payments_collection.delete_one({"order_tracking_id": order_tracking_id})
                             
                 elif payment_status.get('payment_status_description') in ['Failed', 'Invalid']:
                     current_app.logger.info("Payment failed!")
@@ -852,25 +1295,13 @@ def pesapal_callback():
                             current_app.logger.error(f"Error sending failure notification: {str(e)}")
 
                     # Clean up pending payment record
-                    db.pending_payments.delete_one({"order_tracking_id": order_tracking_id})
-        
-        # Handle POST requests (if Pesapal sends any)
-        elif request.method == "POST":
-            callback_data = request.get_json() or request.form.to_dict()
-            current_app.logger.info(f"Pesapal POST callback: {callback_data}")
-            
-            # Process POST callback if needed
-            order_tracking_id = callback_data.get('OrderTrackingId')
-            if order_tracking_id:
-                # Similar processing as GET request
-                pass
+                    pending_payments_collection.delete_one({"order_tracking_id": order_tracking_id})
 
     except Exception as e:
         current_app.logger.error(f"Error processing Pesapal callback: {str(e)}")
     
     # Return success response
-    return "OK", 200
-
+    return "Payment completed, you may now close this window. ", 200
 
 if __name__ == "__main__":
     app.run(debug=True)
