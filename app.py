@@ -1314,13 +1314,43 @@ def tiktok_admin():
     """
     return render_template('tiktok_auth.html')
 
+@app.route("/tiktok/logo")
+def tiktok_logo():
+    """
+    Return the logo URL from S3
+    """
+    try:
+        bucket_name = os.getenv('S3_BUCKET_NAME')
+        region = os.getenv('AWS_REGION', 'us-east-1')
+        
+        if not bucket_name:
+            return jsonify({
+                "success": False,
+                "error": "S3 bucket not configured"
+            }), 400
+        
+        # Construct the public S3 URL
+        logo_url = f"https://{bucket_name}.s3.{region}.amazonaws.com/logo.png"
+        
+        return jsonify({
+            "success": True,
+            "logo_url": logo_url
+        })
+        
+    except Exception as e:
+        current_app.logger.error(f"Error getting logo URL: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to get logo URL"
+        }), 500
+
 @app.route("/tiktok/auth-url")
 def tiktok_auth_url():
     """
     Generate TikTok authorization URL with client key from environment
     """
     try:
-        client_key = os.getenv('TIKTOK_CLIENT_ID')
+        client_key = os.getenv('TIKTOK_CLIENT_KEY')
         base_url = os.getenv('BASE_URL', 'http://localhost:5000')
         redirect_uri = f"{base_url}/tiktok/callback"
         

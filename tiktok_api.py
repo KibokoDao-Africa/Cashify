@@ -36,16 +36,16 @@ def upload_to_tiktok(media_urls=None, is_video=False, caption="", auth_code=None
 
         # Get OAuth credentials from environment
         authorization_code = auth_code or os.getenv("TIKTOK_AUTH_CODE")
-        client_id = os.getenv("TIKTOK_CLIENT_ID")
+        client_key = os.getenv("TIKTOK_CLIENT_KEY")
         client_secret = os.getenv("TIKTOK_CLIENT_SECRET")
         redirect_uri = f"{os.getenv('BASE_URL')}/tiktok/callback"
         
-        if not all([client_id, client_secret, authorization_code]):
+        if not all([client_key, client_secret, authorization_code]):
             raise ValueError("Missing TikTok OAuth credentials in environment")
         
         # Exchange authorization code for access token
         access_token = get_access_token_from_auth_code(
-            authorization_code, client_id, client_secret, redirect_uri
+            authorization_code, client_key, client_secret, redirect_uri
         )
 
         # Prepare video file

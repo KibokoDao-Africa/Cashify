@@ -9,7 +9,7 @@
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             margin: 0;
             padding: 0;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: #f5f0e6;
             min-height: 100vh;
             display: flex;
             align-items: center;
@@ -25,11 +25,29 @@
             max-width: 500px;
             width: 90%;
         }
+
+        .admin-badge {
+            background: #ff6b6b;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8em;
+            font-weight: 600;
+            display: inline-block;
+            margin-bottom: 20px;
+        }
+
+        .logo-image {
+            width: 120px;
+            height: 120px;
+            margin: 0 auto 0 auto;
+            display: block;
+        }
         
         .logo {
             font-size: 2.5em;
             font-weight: bold;
-            color: #667eea;
+            color: #5a4636;
             margin-bottom: 10px;
         }
         
@@ -103,17 +121,6 @@
             fill: currentColor;
         }
         
-        .admin-badge {
-            background: #ff6b6b;
-            color: white;
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 0.8em;
-            font-weight: 600;
-            display: inline-block;
-            margin-bottom: 20px;
-        }
-        
         .feature-list {
             text-align: left;
             margin: 20px 0;
@@ -162,6 +169,7 @@
 <body>
     <div class="container">
         <div class="admin-badge">ADMIN PAGE</div>
+        <img id="logo-image" alt="Own Again Logo" class="logo-image">
         <div class="logo">Own Again</div>
         <div class="subtitle">Marketplace for Pre-Owned Items</div>
         
@@ -209,6 +217,20 @@
 
     <script>
         let currentAuthCode = null;
+
+        // Load logo from S3
+        function loadLogo() {
+            fetch('/tiktok/logo')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success && data.logo_url) {
+                        document.getElementById('logo-image').src = data.logo_url;
+                    }
+                })
+                .catch(error => {
+                    console.error('Failed to load logo:', error);
+                });
+        }
 
         function checkTikTokStatus() {
             fetch('/tiktok/status')
@@ -290,7 +312,8 @@
             }
         });
 
-        // Check status when page loads
+        // Load logo and check status when page loads
+        loadLogo();
         checkTikTokStatus();
 
         // Check status every 5 seconds in case auth completes in another tab
