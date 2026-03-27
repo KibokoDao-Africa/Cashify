@@ -12,8 +12,10 @@ from io import BytesIO
 from datetime import datetime, timedelta
 from payment import initiate_pesapal_payment, check_pesapal_payment_status
 from facebook_graph_api import upload_to_facebook, upload_to_instagram
+from tiktok_api import upload_to_tiktok
 from bson import ObjectId
 from template_manager import template_manager
+from escrow_service import EscrowService
 
 app = Flask(__name__)
 
@@ -23,6 +25,7 @@ CORS(app, resources={
     r"/whatsapp": {"origins": "*"},
     r"/pesapal-callback": {"origins": "*"},
     r"/fees": {"origins": "*"},
+    r"/upload/*": {"origins": "*"},
     r"/escrow/*": {"origins": "*"}
 })
 
@@ -34,6 +37,9 @@ products_collection = db.products
 fees_collection = db.fees  # Collection for category fees
 pending_payments_collection = db.pending_payments
 escrow_payments_collection = db.escrow_payments
+
+# Initialize Escrow Service
+escrow_service = EscrowService(db)
 
 # AWS S3 Configuration
 s3_client = boto3.client(
@@ -468,186 +474,603 @@ def manage_fees():
             "success": False,
             "error": "Failed to manage fees"
         }), 500
-    
-@app.route("/escrow/pay", methods=["POST"])
-def create_escrow_payment():
+
+
+# =============================================================================
+# SOCIAL MEDIA UPLOAD API ENDPOINTS
+# =============================================================================
+
+@app.route("/upload/tiktok", methods=["POST"])
+def upload_tiktok_media():
     """
-    Endpoint for buyers to pay for an item.
-    The money will be held in escrow until the item is confirmed as received.
+    Upload video/images to TikTok.
+    Images are converted to a slideshow video automatically.
+
+    Request body:
+    {
+        "media_urls": ["https://example.com/video.mp4"],
+        "is_video": true,
+        "caption": "Check out this item! #ForSale"
+    }
+
+    Response:
+    {
+        "success": true,
+        "data": {
+            "video_url": "https://tiktok.com/...",
+            "platform": "tiktok"
+        }
+    }
     """
     try:
         data = request.json
-        
+
+        # Validate required fields
+        if "media_urls" not in data or not data["media_urls"]:
+            return jsonify({"success": False, "error": "media_urls is required"}), 400
+
+        media_urls = data["media_urls"]
+        is_video = data.get("is_video", False)
+        caption = data.get("caption", "")
+
+        # Upload to TikTok
+        result = upload_to_tiktok(
+            media_urls=media_urls,
+            is_video=is_video,
+            caption=caption
+        )
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "video_url": result,
+                "platform": "tiktok"
+            }
+        })
+
+    except Exception as e:
+        current_app.logger.error(f"Error uploading to TikTok: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": f"TikTok upload failed: {str(e)}"
+        }), 500
+
+
+@app.route("/upload/instagram", methods=["POST"])
+def upload_instagram_media():
+    """
+    Upload video/images to Instagram feed or story.
+
+    Request body:
+    {
+        "media_urls": ["https://example.com/image1.jpg", "https://example.com/image2.jpg"],
+        "is_video": false,
+        "caption": "Check out this item!",
+        "story": false
+    }
+
+    Response:
+    {
+        "success": true,
+        "data": {
+            "post_id": "17895695668004550",
+            "platform": "instagram",
+            "type": "feed" or "story"
+        }
+    }
+    """
+    try:
+        data = request.json
+
+        if "media_urls" not in data or not data["media_urls"]:
+            return jsonify({"success": False, "error": "media_urls is required"}), 400
+
+        media_urls = data["media_urls"]
+        is_video = data.get("is_video", False)
+        caption = data.get("caption", "")
+        story = data.get("story", False)
+
+        result = upload_to_instagram(
+            media_urls=media_urls,
+            is_video=is_video,
+            caption=caption,
+            story=story
+        )
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "post_id": result,
+                "platform": "instagram",
+                "type": "story" if story else "feed"
+            }
+        })
+
+    except Exception as e:
+        current_app.logger.error(f"Error uploading to Instagram: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": f"Instagram upload failed: {str(e)}"
+        }), 500
+
+
+@app.route("/upload/facebook", methods=["POST"])
+def upload_facebook_media():
+    """
+    Upload video/images to Facebook page.
+
+    Request body:
+    {
+        "media_urls": ["https://example.com/image1.jpg"],
+        "is_video": false,
+        "caption": "Check out this item!"
+    }
+
+    Response:
+    {
+        "success": true,
+        "data": {
+            "post_url": "https://facebook.com/...",
+            "platform": "facebook"
+        }
+    }
+    """
+    try:
+        data = request.json
+
+        if "media_urls" not in data or not data["media_urls"]:
+            return jsonify({"success": False, "error": "media_urls is required"}), 400
+
+        media_urls = data["media_urls"]
+        is_video = data.get("is_video", False)
+        caption = data.get("caption", "")
+
+        result = upload_to_facebook(
+            media_urls=media_urls,
+            is_video=is_video,
+            caption=caption
+        )
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "post_url": result,
+                "platform": "facebook"
+            }
+        })
+
+    except Exception as e:
+        current_app.logger.error(f"Error uploading to Facebook: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": f"Facebook upload failed: {str(e)}"
+        }), 500
+
+
+@app.route("/upload/all", methods=["POST"])
+def upload_to_all_platforms():
+    """
+    Upload media to all platforms (TikTok, Instagram, Facebook) at once.
+
+    Request body:
+    {
+        "media_urls": ["https://example.com/image1.jpg"],
+        "is_video": false,
+        "caption": "Check out this item!",
+        "platforms": ["tiktok", "instagram", "facebook"]  // optional, defaults to all
+    }
+
+    Response:
+    {
+        "success": true,
+        "data": {
+            "tiktok": {"success": true, "video_url": "..."},
+            "instagram": {"success": true, "post_id": "..."},
+            "facebook": {"success": true, "post_url": "..."}
+        }
+    }
+    """
+    try:
+        data = request.json
+
+        if "media_urls" not in data or not data["media_urls"]:
+            return jsonify({"success": False, "error": "media_urls is required"}), 400
+
+        media_urls = data["media_urls"]
+        is_video = data.get("is_video", False)
+        caption = data.get("caption", "")
+        platforms = data.get("platforms", ["tiktok", "instagram", "facebook"])
+
+        results = {}
+
+        # Upload to TikTok
+        if "tiktok" in platforms:
+            try:
+                tiktok_result = upload_to_tiktok(
+                    media_urls=media_urls,
+                    is_video=is_video,
+                    caption=caption
+                )
+                results["tiktok"] = {"success": True, "video_url": tiktok_result}
+            except Exception as e:
+                results["tiktok"] = {"success": False, "error": str(e)}
+
+        # Upload to Instagram
+        if "instagram" in platforms:
+            try:
+                instagram_result = upload_to_instagram(
+                    media_urls=media_urls,
+                    is_video=is_video,
+                    caption=caption
+                )
+                results["instagram"] = {"success": True, "post_id": instagram_result}
+            except Exception as e:
+                results["instagram"] = {"success": False, "error": str(e)}
+
+        # Upload to Facebook
+        if "facebook" in platforms:
+            try:
+                facebook_result = upload_to_facebook(
+                    media_urls=media_urls,
+                    is_video=is_video,
+                    caption=caption
+                )
+                results["facebook"] = {"success": True, "post_url": facebook_result}
+            except Exception as e:
+                results["facebook"] = {"success": False, "error": str(e)}
+
+        # Check if any platform succeeded
+        any_success = any(r.get("success") for r in results.values())
+
+        return jsonify({
+            "success": any_success,
+            "data": results
+        })
+
+    except Exception as e:
+        current_app.logger.error(f"Error uploading to platforms: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": f"Upload failed: {str(e)}"
+        }), 500
+
+
+# =============================================================================
+# ESCROW API ENDPOINTS
+# =============================================================================
+
+@app.route("/escrow/pay", methods=["POST"])
+def create_escrow_payment():
+    """
+    Endpoint for buyers to pay for an item via STK Push.
+    The money will be held in escrow until the buyer confirms receipt.
+
+    Request body:
+    {
+        "product_id": "product_object_id",
+        "buyer_phone": "254712345678",
+        "buyer_name": "John Doe" (optional)
+    }
+
+    Response:
+    {
+        "success": true,
+        "data": {
+            "escrow_id": "escrow_object_id",
+            "payment_url": "https://pay.pesapal.com/...",
+            "amount": 1500.00,
+            "currency": "KES",
+            "seller_phone": "+254...",
+            "product_description": "...",
+            "payment_expiry": "2024-01-15T12:00:00"
+        }
+    }
+    """
+    try:
+        data = request.json
+
         # Validate required fields
         required_fields = ["product_id", "buyer_phone"]
         for field in required_fields:
             if field not in data:
                 return jsonify({"success": False, "error": f"Missing required field: {field}"}), 400
-        
-        # Get product details
-        product = products_collection.find_one({"_id": ObjectId(data["product_id"])})
-        if not product:
-            return jsonify({"success": False, "error": "Product not found"}), 404
-            
-        if product.get("sold", False) or product.get("status") == "reserved":
-            return jsonify({"success": False, "error": "Product is not available"}), 400
-            
-        # Format buyer phone number
-        from payment import format_phone_number
-        buyer_phone = format_phone_number(data["buyer_phone"])
-        
-        # Get payment amount from product
-        amount = float(product.get("selling_price", 0))
-        if amount <= 0:
-            return jsonify({"success": False, "error": "Invalid product price"}), 400
-        
-        # Create escrow payment record
-        escrow_payment = {
-            "product_id": data["product_id"],
-            "seller_number": product["user_number"],
-            "buyer_phone": buyer_phone,
-            "amount": amount,
-            "description": f"Purchase of {product['description']}",
-            "status": "pending",
-            "created_at": datetime.utcnow()
-        }
-        
-        # Insert escrow payment record
-        result = escrow_payments_collection.insert_one(escrow_payment)
-        escrow_id = str(result.inserted_id)
-        
-        # Initiate payment with Pesapal
-        from payment import initiate_pesapal_payment
-        payment_result = initiate_pesapal_payment(
-            amount, 
-            buyer_phone, 
-            f"Purchase of {product['description']}"
+
+        result = escrow_service.create_escrow_payment(
+            product_id=data["product_id"],
+            buyer_phone=data["buyer_phone"],
+            buyer_name=data.get("buyer_name")
         )
-        
-        if payment_result and payment_result.get('redirect_url'):
-            # Update escrow payment with Pesapal tracking details
-            escrow_payments_collection.update_one(
-                {"_id": result.inserted_id},
-                {"$set": {
-                    "order_tracking_id": payment_result.get('order_tracking_id'),
-                    "merchant_reference": payment_result.get('merchant_reference')
-                }}
-            )
-            
-            # Temporarily mark the product as reserved
-            products_collection.update_one(
-                {"_id": ObjectId(data["product_id"])},
-                {"$set": {"status": "reserved", "reserved_by": escrow_id}}
-            )
-            
-            return jsonify({
-                "success": True,
-                "data": {
-                    "escrow_id": escrow_id,
-                    "payment_url": payment_result['redirect_url'],
-                    "amount": amount
-                }
-            })
+
+        if result.get("success"):
+            return jsonify(result), 201
         else:
-            # Clean up escrow record if payment initiation fails
-            escrow_payments_collection.delete_one({"_id": result.inserted_id})
-            return jsonify({
-                "success": False,
-                "error": "Payment initiation failed"
-            }), 500
-            
+            return jsonify(result), 400
+
     except Exception as e:
         current_app.logger.error(f"Error creating escrow payment: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": "Failed to create escrow payment"
-        }), 500
+        return jsonify({"success": False, "error": "Failed to create escrow payment"}), 500
+
+
+@app.route("/escrow/confirm", methods=["POST"])
+def confirm_escrow_receipt():
+    """
+    Endpoint for buyers to confirm they received the item.
+    This triggers automatic release of funds to the seller.
+
+    Request body:
+    {
+        "escrow_id": "escrow_object_id",
+        "buyer_phone": "254712345678"
+    }
+
+    Response:
+    {
+        "success": true,
+        "data": {
+            "escrow_id": "...",
+            "amount": 1500.00,
+            "seller_phone": "+254...",
+            "transaction_id": "AT_TXN_123",
+            "message": "Funds successfully released to seller"
+        }
+    }
+    """
+    try:
+        data = request.json
+
+        required_fields = ["escrow_id", "buyer_phone"]
+        for field in required_fields:
+            if field not in data:
+                return jsonify({"success": False, "error": f"Missing required field: {field}"}), 400
+
+        result = escrow_service.confirm_receipt(
+            escrow_id=data["escrow_id"],
+            buyer_phone=data["buyer_phone"]
+        )
+
+        if result.get("success"):
+            return jsonify(result)
+        else:
+            return jsonify(result), 400
+
+    except Exception as e:
+        current_app.logger.error(f"Error confirming escrow receipt: {str(e)}")
+        return jsonify({"success": False, "error": "Failed to confirm receipt"}), 500
+
 
 @app.route("/escrow/release", methods=["POST"])
 def release_escrow_payment():
     """
-    Endpoint to release funds to a seller after confirming that 
-    the buyer has received the item.
+    Endpoint to manually release funds to a seller.
+    Used by admin or automated processes.
+
+    Request body:
+    {
+        "escrow_id": "escrow_object_id"
+    }
     """
     try:
         data = request.json
-        
-        # Validate required fields
+
         if "escrow_id" not in data:
             return jsonify({"success": False, "error": "Missing escrow_id"}), 400
-        
-        # Get escrow payment details
-        escrow_payment = escrow_payments_collection.find_one({"_id": ObjectId(data["escrow_id"])})
-        if not escrow_payment:
-            return jsonify({"success": False, "error": "Escrow payment not found"}), 404
-            
-        # Check if payment is already processed
-        if escrow_payment.get("status") == "released":
-            return jsonify({"success": False, "error": "Payment has already been released"}), 400
-        
-        # Check if payment is confirmed
-        if escrow_payment.get("status") != "paid":
-            return jsonify({"success": False, "error": "Payment is not confirmed yet"}), 400
-            
-        # Get product details
-        product = products_collection.find_one({"_id": ObjectId(escrow_payment["product_id"])})
-        if not product:
-            return jsonify({"success": False, "error": "Associated product not found"}), 404
-        
-        # Send money to seller using AfricasTalking
-        from payment import send_money_via_at
-        seller_phone = product["user_number"]
-        amount = escrow_payment["amount"]
-        
-        payment_result = send_money_via_at(
-            seller_phone,
-            amount,
-            f"Payment for {product['description']}"
-        )
 
-        current_app.logger.info(f"AfricasTalking payment result: {payment_result}")
-        
-        if payment_result and payment_result.get("status") == "success":
-            # Update escrow payment status
-            escrow_payments_collection.update_one(
-                {"_id": ObjectId(data["escrow_id"])},
-                {"$set": {
-                    "status": "released",
-                    "released_at": datetime.utcnow(),
-                    "payment_reference": payment_result.get("data", {}).get("transactionId")
-                }}
-            )
-            
-            # Mark product as sold
-            products_collection.update_one(
-                {"_id": ObjectId(escrow_payment["product_id"])},
-                {"$set": {
-                    "status": "sold",
-                    "sold": True,
-                    "sold_at": datetime.utcnow(),
-                    "sold_to": escrow_payment.get("buyer_phone")
-                }}
-            )
-            
-            return jsonify({
-                "success": True,
-                "data": {
-                    "message": "Payment released to seller",
-                    "transaction_id": payment_result.get("data", {}).get("transactionId")
-                }
-            })
+        result = escrow_service.release_funds(escrow_id=data["escrow_id"])
+
+        if result.get("success"):
+            current_app.logger.info(f"Escrow funds released: {result}")
+            return jsonify(result)
         else:
-            return jsonify({
-                "success": False,
-                "error": "Failed to release payment"
-            }), 500
-            
+            return jsonify(result), 400
+
     except Exception as e:
         current_app.logger.error(f"Error releasing escrow payment: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": "Failed to release escrow payment"
-        }), 500
+        return jsonify({"success": False, "error": "Failed to release escrow payment"}), 500
+
+
+@app.route("/escrow/status/<escrow_id>", methods=["GET"])
+def get_escrow_status(escrow_id):
+    """
+    Get the current status of an escrow payment.
+
+    Query params:
+    - phone: Optional phone number for verification
+
+    Response:
+    {
+        "success": true,
+        "data": {
+            "escrow_id": "...",
+            "status": "paid",
+            "amount": 1500.00,
+            "currency": "KES",
+            "product_description": "...",
+            "buyer_phone": "+254...",
+            "seller_phone": "+254...",
+            "created_at": "2024-01-14T10:00:00",
+            "paid_at": "2024-01-14T10:05:00",
+            "confirmation_deadline": "2024-01-21T10:05:00",
+            "history": [...]
+        }
+    }
+    """
+    try:
+        requester_phone = request.args.get("phone")
+        result = escrow_service.get_escrow_status(
+            escrow_id=escrow_id,
+            requester_phone=requester_phone
+        )
+
+        if result.get("success"):
+            return jsonify(result)
+        else:
+            return jsonify(result), 404
+
+    except Exception as e:
+        current_app.logger.error(f"Error getting escrow status: {str(e)}")
+        return jsonify({"success": False, "error": "Failed to get escrow status"}), 500
+
+
+@app.route("/escrow/dispute", methods=["POST"])
+def raise_escrow_dispute():
+    """
+    Endpoint for buyers to raise a dispute about a transaction.
+
+    Request body:
+    {
+        "escrow_id": "escrow_object_id",
+        "buyer_phone": "254712345678",
+        "reason": "Item not as described"
+    }
+    """
+    try:
+        data = request.json
+
+        required_fields = ["escrow_id", "buyer_phone", "reason"]
+        for field in required_fields:
+            if field not in data:
+                return jsonify({"success": False, "error": f"Missing required field: {field}"}), 400
+
+        result = escrow_service.raise_dispute(
+            escrow_id=data["escrow_id"],
+            buyer_phone=data["buyer_phone"],
+            reason=data["reason"]
+        )
+
+        if result.get("success"):
+            return jsonify(result)
+        else:
+            return jsonify(result), 400
+
+    except Exception as e:
+        current_app.logger.error(f"Error raising dispute: {str(e)}")
+        return jsonify({"success": False, "error": "Failed to raise dispute"}), 500
+
+
+@app.route("/escrow/refund", methods=["POST"])
+def process_escrow_refund():
+    """
+    Admin endpoint to process a refund to buyer.
+
+    Request body:
+    {
+        "escrow_id": "escrow_object_id",
+        "admin_note": "Refund approved due to..."
+    }
+    """
+    try:
+        data = request.json
+
+        if "escrow_id" not in data:
+            return jsonify({"success": False, "error": "Missing escrow_id"}), 400
+
+        result = escrow_service.process_refund(
+            escrow_id=data["escrow_id"],
+            admin_note=data.get("admin_note")
+        )
+
+        if result.get("success"):
+            return jsonify(result)
+        else:
+            return jsonify(result), 400
+
+    except Exception as e:
+        current_app.logger.error(f"Error processing refund: {str(e)}")
+        return jsonify({"success": False, "error": "Failed to process refund"}), 500
+
+
+@app.route("/escrow/buyer/<buyer_phone>", methods=["GET"])
+def get_buyer_escrows(buyer_phone):
+    """
+    Get all escrow payments for a buyer.
+
+    Response:
+    {
+        "success": true,
+        "data": [
+            {
+                "escrow_id": "...",
+                "status": "paid",
+                "amount": 1500.00,
+                "product_description": "...",
+                "created_at": "..."
+            },
+            ...
+        ]
+    }
+    """
+    try:
+        result = escrow_service.get_buyer_escrows(buyer_phone=buyer_phone)
+
+        if result.get("success"):
+            return jsonify(result)
+        else:
+            return jsonify(result), 400
+
+    except Exception as e:
+        current_app.logger.error(f"Error getting buyer escrows: {str(e)}")
+        return jsonify({"success": False, "error": "Failed to get buyer escrows"}), 500
+
+
+@app.route("/escrow/seller/<seller_phone>", methods=["GET"])
+def get_seller_escrows(seller_phone):
+    """
+    Get all escrow payments for a seller.
+
+    Response:
+    {
+        "success": true,
+        "data": [
+            {
+                "escrow_id": "...",
+                "status": "paid",
+                "amount": 1500.00,
+                "product_description": "...",
+                "buyer_phone": "+254...",
+                "created_at": "..."
+            },
+            ...
+        ]
+    }
+    """
+    try:
+        result = escrow_service.get_seller_escrows(seller_phone=seller_phone)
+
+        if result.get("success"):
+            return jsonify(result)
+        else:
+            return jsonify(result), 400
+
+    except Exception as e:
+        current_app.logger.error(f"Error getting seller escrows: {str(e)}")
+        return jsonify({"success": False, "error": "Failed to get seller escrows"}), 500
+
+
+@app.route("/escrow/process-auto-releases", methods=["POST"])
+def process_auto_releases():
+    """
+    Admin/Cron endpoint to process automatic releases for escrows
+    that have passed their confirmation deadline.
+    """
+    try:
+        result = escrow_service.process_auto_releases()
+        return jsonify(result)
+    except Exception as e:
+        current_app.logger.error(f"Error processing auto releases: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/escrow/process-expired", methods=["POST"])
+def process_expired_payments():
+    """
+    Admin/Cron endpoint to cancel escrows with expired payment windows.
+    """
+    try:
+        result = escrow_service.process_expired_payments()
+        return jsonify(result)
+    except Exception as e:
+        current_app.logger.error(f"Error processing expired payments: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_webhook():
@@ -1200,17 +1623,53 @@ def pesapal_callback():
 
                     # Check if this is an escrow payment
                     escrow_payment = db.escrow_payments.find_one({"order_tracking_id": order_tracking_id})
-                    
+
                     if escrow_payment:
-                        # Update escrow payment status
-                        db.escrow_payments.update_one(
-                            {"_id": escrow_payment["_id"]},
-                            {"$set": {
-                                "status": "paid",
-                                "paid_at": datetime.utcnow(),
-                                "payment_details": payment_status
-                            }}
+                        # Use escrow service to handle payment callback
+                        escrow_result = escrow_service.handle_payment_callback(
+                            order_tracking_id=order_tracking_id,
+                            payment_status_data=payment_status
                         )
+                        current_app.logger.info(f"Escrow payment callback result: {escrow_result}")
+
+                        # Notify buyer that payment is received
+                        if escrow_result.get("success"):
+                            try:
+                                client = Client(os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
+                                twilio_number = os.getenv('TWILIO_WHATSAPP_NUMBER')
+                                if not twilio_number.startswith('whatsapp:'):
+                                    twilio_number = f"whatsapp:{twilio_number}"
+
+                                buyer_message = (
+                                    f"Payment received! Your funds (KES {escrow_payment.get('amount')}) "
+                                    f"are now held securely in escrow.\n\n"
+                                    f"Item: {escrow_payment.get('description')}\n\n"
+                                    f"Once you receive and verify the item, confirm receipt to release "
+                                    f"payment to the seller. You have 7 days to confirm or raise a dispute."
+                                )
+
+                                client.messages.create(
+                                    body=buyer_message,
+                                    from_=twilio_number,
+                                    to=escrow_payment.get("buyer_phone")
+                                )
+
+                                # Also notify seller
+                                seller_message = (
+                                    f"Good news! A buyer has paid for your item.\n\n"
+                                    f"Item: {escrow_payment.get('description')}\n"
+                                    f"Amount: KES {escrow_payment.get('amount')}\n\n"
+                                    f"Please arrange delivery with the buyer. "
+                                    f"Funds will be released to your M-Pesa once the buyer confirms receipt."
+                                )
+
+                                client.messages.create(
+                                    body=seller_message,
+                                    from_=twilio_number,
+                                    to=escrow_payment.get("seller_number")
+                                )
+                            except Exception as notify_error:
+                                current_app.logger.error(f"Error sending escrow notifications: {str(notify_error)}")
 
                     if user_number:
                         current_app.logger.info(f"Payment received from user: {user_number}")
