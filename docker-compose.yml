@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  cashify:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cashify
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${PORT:-8000}:${PORT:-8000}"
+    volumes:
+      - ./logs:/bot/logs
+    networks:
+      - cashify-network
+
+networks:
+  cashify-network:
+    driver: bridge

@@ -1,0 +1,46 @@
+name: Deploy to Hetzner
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Hetzner Server
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.HETZNER_HOST }}
+          username: ${{ secrets.HETZNER_USERNAME }}
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          port: ${{ secrets.HETZNER_PORT || 22 }}
+          script: |
+            # Navigate to project directory
+            cd ${{ secrets.DEPLOY_PATH || '/opt/cashify' }}
+
+            # Pull latest changes
+            git pull origin main
+
+            # Stop existing container
+            docker-compose down || docker stop cashify || true
+
+            # Build and start new container
+            docker-compose up -d --build || docker build -t cashify . && docker run -d --name cashify -p ${PORT:-8000}:${PORT:-8000} --env-file .env cashify
+
+            # Clean up old images
+            docker image prune -f
+
+      - name: Deployment Status
+        if: success()
+        run: echo "Deployment to Hetzner completed successfully!"
+
+      - name: Deployment Failed
+        if: failure()
+        run: echo "Deployment failed. Check logs for details."
