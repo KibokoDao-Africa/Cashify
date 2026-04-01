@@ -18,9 +18,12 @@ RUN apt-get update && \
     apt-get install -y ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
+# upgrade pip and install setuptools first
+RUN pip3 install --upgrade pip setuptools wheel
+
 # copy and install dependencies to working directory
 COPY requirements.txt requirements.txt
-RUN pip3 install -r requirements.txt
+RUN pip3 install --no-cache-dir -r requirements.txt
 
 # copy source code to working directory
 COPY . .
