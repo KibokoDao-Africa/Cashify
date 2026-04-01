@@ -7,3 +7,4 @@ moviepy==2.2.1
 pymongo~=4.3.3
 setuptools>=65.0.0
 twilio==9.5.1
+pkg_resources
