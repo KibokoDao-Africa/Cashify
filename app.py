@@ -21,6 +21,7 @@ app = Flask(__name__)
 
 # Configure CORS with specific settings
 CORS(app, resources={
+    r"/": {"origins": "*"},
     r"/products*": {"origins": "*"},
     r"/whatsapp": {"origins": "*"},
     r"/pesapal-callback": {"origins": "*"},
@@ -1761,6 +1762,22 @@ def pesapal_callback():
     
     # Return success response
     return "Payment completed, you may now close this window. ", 200
+
+@app.route("/", methods=["GET"])
+def health_check():
+    """Health check endpoint to verify the application is running"""
+    return jsonify({
+        "status": "healthy",
+        "service": "Cashify API",
+        "version": "1.0.0",
+        "endpoints": {
+            "products": "/products",
+            "fees": "/fees",
+            "upload": "/upload/{platform}",
+            "escrow": "/escrow/*",
+            "whatsapp": "/whatsapp"
+        }
+    }), 200
 
 if __name__ == "__main__":
     app.run(debug=True)
