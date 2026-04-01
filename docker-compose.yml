@@ -1,6 +1,26 @@
 version: '3.8'
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: cashify-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cashify}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cashify123}
+      POSTGRES_DB: ${POSTGRES_DB:-cashify}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - cashify-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cashify}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   cashify:
     build:
       context: .
@@ -15,6 +35,15 @@ services:
       - ./logs:/bot/logs
     networks:
       - cashify-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-cashify}:${POSTGRES_PASSWORD:-cashify123}@postgres:5432/${POSTGRES_DB:-cashify}
+
+volumes:
+  postgres_data:
+    driver: local
 
 networks:
   cashify-network:
