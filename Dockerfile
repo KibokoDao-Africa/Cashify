@@ -28,6 +28,9 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 # copy source code to working directory
 COPY . .
 
+# set default port if not provided
+ENV PORT=8000
+
 # run the application using gunicorn
 CMD sh -c "gunicorn -b 0.0.0.0:${PORT} app:app"
 

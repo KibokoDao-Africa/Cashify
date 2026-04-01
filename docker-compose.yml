@@ -37,6 +37,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
+      - PORT=${PORT:-8000}
       - DATABASE_URL=postgresql://${POSTGRES_USER:-cashify}:${POSTGRES_PASSWORD:-cashify123}@postgres:5432/${POSTGRES_DB:-cashify}
 
 volumes:
