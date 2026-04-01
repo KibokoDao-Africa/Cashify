@@ -1,5 +1,6 @@
 from flask import Flask, request, current_app, jsonify
 from flask_cors import CORS
+from flasgger import Swagger
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
 from pymongo import MongoClient
@@ -29,6 +30,48 @@ CORS(app, resources={
     r"/upload/*": {"origins": "*"},
     r"/escrow/*": {"origins": "*"}
 })
+
+# Swagger configuration
+swagger_config = {
+    "headers": [],
+    "specs": [
+        {
+            "endpoint": 'apispec',
+            "route": '/apispec.json',
+            "rule_filter": lambda rule: True,
+            "model_filter": lambda tag: True,
+        }
+    ],
+    "static_url_path": "/flasgger_static",
+    "swagger_ui": True,
+    "specs_route": "/docs"
+}
+
+swagger_template = {
+    "swagger": "2.0",
+    "info": {
+        "title": "Cashify API",
+        "description": "API for Cashify - A marketplace platform with escrow payments, product listings, and social media integration",
+        "version": "1.0.0",
+        "contact": {
+            "name": "Cashify Support"
+        }
+    },
+    "host": os.getenv("SWAGGER_HOST", "95.217.176.128:8000"),
+    "basePath": "/",
+    "schemes": ["http", "https"],
+    "tags": [
+        {"name": "Health", "description": "Health check endpoints"},
+        {"name": "Products", "description": "Product management endpoints"},
+        {"name": "Fees", "description": "Category fee management"},
+        {"name": "Social Media", "description": "Social media upload endpoints"},
+        {"name": "Escrow", "description": "Escrow payment endpoints"},
+        {"name": "WhatsApp", "description": "WhatsApp webhook endpoint"},
+        {"name": "Payment", "description": "Payment callback endpoints"}
+    ]
+}
+
+swagger = Swagger(app, config=swagger_config, template=swagger_template)
 
 # MongoDB connection
 mongo_client = MongoClient(os.getenv("MONGODB_URI", "mongodb://localhost:27017/"))
@@ -265,8 +308,107 @@ def process_social_media_uploads(user_number, media_urls, media_type, descriptio
 
 @app.route("/products", methods=["POST"])
 def create_product():
-    """
-    Endpoint to create a new product listing
+    """Create a new product listing
+    ---
+    tags:
+      - Products
+    summary: Create a new product
+    description: Creates a new product listing with all required details
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - user_number
+            - media_urls
+            - media_type
+            - description
+            - category
+            - condition
+            - buying_price
+            - selling_price
+            - reason_for_selling
+            - location
+            - contact
+          properties:
+            user_number:
+              type: string
+              example: "+254712345678"
+            media_urls:
+              type: array
+              items:
+                type: string
+              example: ["https://example.com/image1.jpg", "https://example.com/image2.jpg"]
+            media_type:
+              type: string
+              enum: [images, video]
+              example: images
+            description:
+              type: string
+              example: "iPhone 15 Pro Max in excellent condition"
+            category:
+              type: string
+              example: "Electronics"
+            condition:
+              type: string
+              example: "Used - Like New"
+            buying_price:
+              type: number
+              example: 120000
+            selling_price:
+              type: number
+              example: 100000
+            reason_for_selling:
+              type: string
+              example: "Upgrading to newer model"
+            location:
+              type: string
+              example: "Nairobi, Kenya"
+            contact:
+              type: string
+              example: "+254712345678"
+    responses:
+      201:
+        description: Product created successfully
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+              example: true
+            data:
+              type: object
+              properties:
+                id:
+                  type: string
+                  example: "507f1f77bcf86cd799439011"
+                message:
+                  type: string
+                  example: "Product created successfully"
+      400:
+        description: Missing required field
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+              example: false
+            error:
+              type: string
+              example: "Missing required field: description"
+      500:
+        description: Server error
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+              example: false
+            error:
+              type: string
+              example: "Failed to create product"
     """
     try:
         data = request.json
@@ -315,8 +457,104 @@ def create_product():
 
 @app.route("/products", methods=["GET"])
 def get_all_products():
-    """
-    Public endpoint to get all products
+    """Get all products
+    ---
+    tags:
+      - Products
+    summary: Get all active products
+    description: Retrieves all active and unsold products with pagination support
+    parameters:
+      - in: query
+        name: page
+        type: integer
+        default: 1
+        description: Page number for pagination
+      - in: query
+        name: limit
+        type: integer
+        default: 20
+        description: Number of products per page
+    responses:
+      200:
+        description: Products retrieved successfully
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+              example: true
+            data:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    example: "507f1f77bcf86cd799439011"
+                  description:
+                    type: string
+                    example: "iPhone 15 Pro Max"
+                  media_urls:
+                    type: array
+                    items:
+                      type: string
+                    example: ["https://example.com/image1.jpg"]
+                  media_type:
+                    type: string
+                    example: "images"
+                  category:
+                    type: string
+                    example: "Electronics"
+                  condition:
+                    type: string
+                    example: "Used - Like New"
+                  buying_price:
+                    type: number
+                    example: 120000
+                  selling_price:
+                    type: number
+                    example: 100000
+                  reason_for_selling:
+                    type: string
+                    example: "Upgrading"
+                  location:
+                    type: string
+                    example: "Nairobi"
+                  contact:
+                    type: string
+                    example: "+254712345678"
+                  created_at:
+                    type: string
+                    format: date-time
+                  user_number:
+                    type: string
+                    example: "+254712345678"
+            pagination:
+              type: object
+              properties:
+                current_page:
+                  type: integer
+                  example: 1
+                limit:
+                  type: integer
+                  example: 20
+                total_products:
+                  type: integer
+                  example: 100
+                total_pages:
+                  type: integer
+                  example: 5
+      500:
+        description: Server error
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+              example: false
+            error:
+              type: string
+              example: "Failed to fetch products"
     """
     try:
         # Get query parameters for pagination
@@ -373,8 +611,75 @@ def get_all_products():
 
 @app.route("/products/<product_id>", methods=["GET"])
 def get_product(product_id):
-    """
-    Get a specific product by ID
+    """Get a specific product
+    ---
+    tags:
+      - Products
+    summary: Get product by ID
+    description: Retrieves details of a specific product by its ID
+    parameters:
+      - in: path
+        name: product_id
+        type: string
+        required: true
+        description: The product ID (MongoDB ObjectId)
+        example: "507f1f77bcf86cd799439011"
+    responses:
+      200:
+        description: Product found
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+              example: true
+            data:
+              type: object
+              properties:
+                id:
+                  type: string
+                description:
+                  type: string
+                media_urls:
+                  type: array
+                  items:
+                    type: string
+                media_type:
+                  type: string
+                category:
+                  type: string
+                condition:
+                  type: string
+                buying_price:
+                  type: number
+                selling_price:
+                  type: number
+                reason_for_selling:
+                  type: string
+                location:
+                  type: string
+                contact:
+                  type: string
+                created_at:
+                  type: string
+                  format: date-time
+                user_number:
+                  type: string
+                sold:
+                  type: boolean
+      404:
+        description: Product not found
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+              example: false
+            error:
+              type: string
+              example: "Product not found"
+      500:
+        description: Server error
     """
     try:
         product = products_collection.find_one({"_id": ObjectId(product_id)})
@@ -416,8 +721,54 @@ def get_product(product_id):
 
 @app.route("/fees", methods=["GET", "POST"])
 def manage_fees():
-    """
-    Endpoint to get or update category fees
+    """Manage category fees
+    ---
+    tags:
+      - Fees
+    summary: Get or update category fees
+    description: Retrieve current fee structure or update fees for specific categories
+    parameters:
+      - in: body
+        name: body
+        required: false
+        description: Only required for POST requests to update fees
+        schema:
+          type: object
+          properties:
+            category:
+              type: string
+              example: "Electronics"
+            fee_percentage:
+              type: number
+              example: 5
+    responses:
+      200:
+        description: Fees retrieved or updated successfully
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+              example: true
+            data:
+              type: object
+              example: {"default": 400, "Real Estate": 1500, "Vehicles": 1500}
+            message:
+              type: string
+              example: "Fees updated successfully"
+      400:
+        description: Invalid data format
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+              example: false
+            error:
+              type: string
+              example: "Invalid data format"
+      500:
+        description: Server error
     """
     try:
         # Initialize fees if they don't exist
@@ -483,25 +834,64 @@ def manage_fees():
 
 @app.route("/upload/tiktok", methods=["POST"])
 def upload_tiktok_media():
-    """
-    Upload video/images to TikTok.
-    Images are converted to a slideshow video automatically.
-
-    Request body:
-    {
-        "media_urls": ["https://example.com/video.mp4"],
-        "is_video": true,
-        "caption": "Check out this item! #ForSale"
-    }
-
-    Response:
-    {
-        "success": true,
-        "data": {
-            "video_url": "https://tiktok.com/...",
-            "platform": "tiktok"
-        }
-    }
+    """Upload media to TikTok
+    ---
+    tags:
+      - Social Media
+    summary: Upload video or images to TikTok
+    description: Upload media to TikTok. Images are automatically converted to a slideshow video
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - media_urls
+          properties:
+            media_urls:
+              type: array
+              items:
+                type: string
+              example: ["https://example.com/video.mp4"]
+            is_video:
+              type: boolean
+              default: false
+              example: true
+            caption:
+              type: string
+              example: "Check out this item! #ForSale"
+    responses:
+      200:
+        description: Upload successful
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+              example: true
+            data:
+              type: object
+              properties:
+                video_url:
+                  type: string
+                  example: "https://tiktok.com/..."
+                platform:
+                  type: string
+                  example: "tiktok"
+      400:
+        description: Missing required field
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+              example: false
+            error:
+              type: string
+              example: "media_urls is required"
+      500:
+        description: Upload failed
     """
     try:
         data = request.json
@@ -539,26 +929,61 @@ def upload_tiktok_media():
 
 @app.route("/upload/instagram", methods=["POST"])
 def upload_instagram_media():
-    """
-    Upload video/images to Instagram feed or story.
-
-    Request body:
-    {
-        "media_urls": ["https://example.com/image1.jpg", "https://example.com/image2.jpg"],
-        "is_video": false,
-        "caption": "Check out this item!",
-        "story": false
-    }
-
-    Response:
-    {
-        "success": true,
-        "data": {
-            "post_id": "17895695668004550",
-            "platform": "instagram",
-            "type": "feed" or "story"
-        }
-    }
+    """Upload media to Instagram
+    ---
+    tags:
+      - Social Media
+    summary: Upload video or images to Instagram
+    description: Upload media to Instagram feed or story
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - media_urls
+          properties:
+            media_urls:
+              type: array
+              items:
+                type: string
+              example: ["https://example.com/image1.jpg", "https://example.com/image2.jpg"]
+            is_video:
+              type: boolean
+              default: false
+            caption:
+              type: string
+              example: "Check out this item!"
+            story:
+              type: boolean
+              default: false
+              description: Set to true to post as story instead of feed
+    responses:
+      200:
+        description: Upload successful
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+              example: true
+            data:
+              type: object
+              properties:
+                post_id:
+                  type: string
+                  example: "17895695668004550"
+                platform:
+                  type: string
+                  example: "instagram"
+                type:
+                  type: string
+                  enum: [feed, story]
+      400:
+        description: Missing required field
+      500:
+        description: Upload failed
     """
     try:
         data = request.json
@@ -597,24 +1022,54 @@ def upload_instagram_media():
 
 @app.route("/upload/facebook", methods=["POST"])
 def upload_facebook_media():
-    """
-    Upload video/images to Facebook page.
-
-    Request body:
-    {
-        "media_urls": ["https://example.com/image1.jpg"],
-        "is_video": false,
-        "caption": "Check out this item!"
-    }
-
-    Response:
-    {
-        "success": true,
-        "data": {
-            "post_url": "https://facebook.com/...",
-            "platform": "facebook"
-        }
-    }
+    """Upload media to Facebook
+    ---
+    tags:
+      - Social Media
+    summary: Upload video or images to Facebook
+    description: Upload media to Facebook page
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - media_urls
+          properties:
+            media_urls:
+              type: array
+              items:
+                type: string
+              example: ["https://example.com/image1.jpg"]
+            is_video:
+              type: boolean
+              default: false
+            caption:
+              type: string
+              example: "Check out this item!"
+    responses:
+      200:
+        description: Upload successful
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+              example: true
+            data:
+              type: object
+              properties:
+                post_url:
+                  type: string
+                  example: "https://facebook.com/..."
+                platform:
+                  type: string
+                  example: "facebook"
+      400:
+        description: Missing required field
+      500:
+        description: Upload failed
     """
     try:
         data = request.json
@@ -650,26 +1105,76 @@ def upload_facebook_media():
 
 @app.route("/upload/all", methods=["POST"])
 def upload_to_all_platforms():
-    """
-    Upload media to all platforms (TikTok, Instagram, Facebook) at once.
-
-    Request body:
-    {
-        "media_urls": ["https://example.com/image1.jpg"],
-        "is_video": false,
-        "caption": "Check out this item!",
-        "platforms": ["tiktok", "instagram", "facebook"]  // optional, defaults to all
-    }
-
-    Response:
-    {
-        "success": true,
-        "data": {
-            "tiktok": {"success": true, "video_url": "..."},
-            "instagram": {"success": true, "post_id": "..."},
-            "facebook": {"success": true, "post_url": "..."}
-        }
-    }
+    """Upload media to all platforms
+    ---
+    tags:
+      - Social Media
+    summary: Upload to all social media platforms
+    description: Upload media to TikTok, Instagram, and Facebook simultaneously
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - media_urls
+          properties:
+            media_urls:
+              type: array
+              items:
+                type: string
+              example: ["https://example.com/image1.jpg"]
+            is_video:
+              type: boolean
+              default: false
+            caption:
+              type: string
+              example: "Check out this item!"
+            platforms:
+              type: array
+              items:
+                type: string
+                enum: [tiktok, instagram, facebook]
+              default: ["tiktok", "instagram", "facebook"]
+              description: Platforms to upload to (defaults to all)
+    responses:
+      200:
+        description: Upload completed (check individual platform results)
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+              example: true
+            data:
+              type: object
+              properties:
+                tiktok:
+                  type: object
+                  properties:
+                    success:
+                      type: boolean
+                    video_url:
+                      type: string
+                instagram:
+                  type: object
+                  properties:
+                    success:
+                      type: boolean
+                    post_id:
+                      type: string
+                facebook:
+                  type: object
+                  properties:
+                    success:
+                      type: boolean
+                    post_url:
+                      type: string
+      400:
+        description: Missing required field
+      500:
+        description: Upload failed
     """
     try:
         data = request.json
@@ -742,30 +1247,71 @@ def upload_to_all_platforms():
 
 @app.route("/escrow/pay", methods=["POST"])
 def create_escrow_payment():
-    """
-    Endpoint for buyers to pay for an item via STK Push.
-    The money will be held in escrow until the buyer confirms receipt.
-
-    Request body:
-    {
-        "product_id": "product_object_id",
-        "buyer_phone": "254712345678",
-        "buyer_name": "John Doe" (optional)
-    }
-
-    Response:
-    {
-        "success": true,
-        "data": {
-            "escrow_id": "escrow_object_id",
-            "payment_url": "https://pay.pesapal.com/...",
-            "amount": 1500.00,
-            "currency": "KES",
-            "seller_phone": "+254...",
-            "product_description": "...",
-            "payment_expiry": "2024-01-15T12:00:00"
-        }
-    }
+    """Create escrow payment
+    ---
+    tags:
+      - Escrow
+    summary: Create an escrow payment for a product
+    description: Buyer initiates payment for a product. Money is held in escrow until buyer confirms receipt
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - product_id
+            - buyer_phone
+          properties:
+            product_id:
+              type: string
+              example: "507f1f77bcf86cd799439011"
+              description: MongoDB ObjectId of the product
+            buyer_phone:
+              type: string
+              example: "254712345678"
+              description: Buyer's phone number
+            buyer_name:
+              type: string
+              example: "John Doe"
+              description: Buyer's name (optional)
+    responses:
+      201:
+        description: Escrow payment created successfully
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+              example: true
+            data:
+              type: object
+              properties:
+                escrow_id:
+                  type: string
+                  example: "507f1f77bcf86cd799439012"
+                payment_url:
+                  type: string
+                  example: "https://pay.pesapal.com/..."
+                amount:
+                  type: number
+                  example: 1500.00
+                currency:
+                  type: string
+                  example: "KES"
+                seller_phone:
+                  type: string
+                  example: "+254712345678"
+                product_description:
+                  type: string
+                  example: "iPhone 15 Pro Max"
+                payment_expiry:
+                  type: string
+                  format: date-time
+      400:
+        description: Missing required field or invalid request
+      500:
+        description: Failed to create escrow payment
     """
     try:
         data = request.json
@@ -794,27 +1340,60 @@ def create_escrow_payment():
 
 @app.route("/escrow/confirm", methods=["POST"])
 def confirm_escrow_receipt():
-    """
-    Endpoint for buyers to confirm they received the item.
-    This triggers automatic release of funds to the seller.
-
-    Request body:
-    {
-        "escrow_id": "escrow_object_id",
-        "buyer_phone": "254712345678"
-    }
-
-    Response:
-    {
-        "success": true,
-        "data": {
-            "escrow_id": "...",
-            "amount": 1500.00,
-            "seller_phone": "+254...",
-            "transaction_id": "AT_TXN_123",
-            "message": "Funds successfully released to seller"
-        }
-    }
+    """Confirm receipt of goods
+    ---
+    tags:
+      - Escrow
+    summary: Buyer confirms receipt of item
+    description: Buyer confirms they received the item, triggering automatic release of funds to seller
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - escrow_id
+            - buyer_phone
+          properties:
+            escrow_id:
+              type: string
+              example: "507f1f77bcf86cd799439012"
+              description: The escrow payment ID
+            buyer_phone:
+              type: string
+              example: "254712345678"
+              description: Buyer's phone number for verification
+    responses:
+      200:
+        description: Funds released successfully
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+              example: true
+            data:
+              type: object
+              properties:
+                escrow_id:
+                  type: string
+                amount:
+                  type: number
+                  example: 1500.00
+                seller_phone:
+                  type: string
+                  example: "+254712345678"
+                transaction_id:
+                  type: string
+                  example: "AT_TXN_123"
+                message:
+                  type: string
+                  example: "Funds successfully released to seller"
+      400:
+        description: Missing required field or invalid request
+      500:
+        description: Failed to confirm receipt
     """
     try:
         data = request.json
@@ -871,29 +1450,72 @@ def release_escrow_payment():
 
 @app.route("/escrow/status/<escrow_id>", methods=["GET"])
 def get_escrow_status(escrow_id):
-    """
-    Get the current status of an escrow payment.
-
-    Query params:
-    - phone: Optional phone number for verification
-
-    Response:
-    {
-        "success": true,
-        "data": {
-            "escrow_id": "...",
-            "status": "paid",
-            "amount": 1500.00,
-            "currency": "KES",
-            "product_description": "...",
-            "buyer_phone": "+254...",
-            "seller_phone": "+254...",
-            "created_at": "2024-01-14T10:00:00",
-            "paid_at": "2024-01-14T10:05:00",
-            "confirmation_deadline": "2024-01-21T10:05:00",
-            "history": [...]
-        }
-    }
+    """Get escrow payment status
+    ---
+    tags:
+      - Escrow
+    summary: Get escrow payment status
+    description: Retrieve the current status and details of an escrow payment
+    parameters:
+      - in: path
+        name: escrow_id
+        type: string
+        required: true
+        description: The escrow payment ID
+        example: "507f1f77bcf86cd799439012"
+      - in: query
+        name: phone
+        type: string
+        required: false
+        description: Phone number for verification (optional)
+        example: "254712345678"
+    responses:
+      200:
+        description: Escrow status retrieved successfully
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+              example: true
+            data:
+              type: object
+              properties:
+                escrow_id:
+                  type: string
+                status:
+                  type: string
+                  enum: [pending, paid, confirmed, released, disputed, refunded, cancelled, expired]
+                  example: "paid"
+                amount:
+                  type: number
+                  example: 1500.00
+                currency:
+                  type: string
+                  example: "KES"
+                product_description:
+                  type: string
+                buyer_phone:
+                  type: string
+                seller_phone:
+                  type: string
+                created_at:
+                  type: string
+                  format: date-time
+                paid_at:
+                  type: string
+                  format: date-time
+                confirmation_deadline:
+                  type: string
+                  format: date-time
+                history:
+                  type: array
+                  items:
+                    type: object
+      404:
+        description: Escrow payment not found
+      500:
+        description: Failed to get escrow status
     """
     try:
         requester_phone = request.args.get("phone")
@@ -914,15 +1536,47 @@ def get_escrow_status(escrow_id):
 
 @app.route("/escrow/dispute", methods=["POST"])
 def raise_escrow_dispute():
-    """
-    Endpoint for buyers to raise a dispute about a transaction.
-
-    Request body:
-    {
-        "escrow_id": "escrow_object_id",
-        "buyer_phone": "254712345678",
-        "reason": "Item not as described"
-    }
+    """Raise escrow dispute
+    ---
+    tags:
+      - Escrow
+    summary: Raise a dispute on an escrow payment
+    description: Buyer can raise a dispute if item is not as described or not received
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - escrow_id
+            - buyer_phone
+            - reason
+          properties:
+            escrow_id:
+              type: string
+              example: "507f1f77bcf86cd799439012"
+            buyer_phone:
+              type: string
+              example: "254712345678"
+            reason:
+              type: string
+              example: "Item not as described"
+    responses:
+      200:
+        description: Dispute raised successfully
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+              example: true
+            data:
+              type: object
+      400:
+        description: Missing required field or invalid request
+      500:
+        description: Failed to raise dispute
     """
     try:
         data = request.json
@@ -1765,7 +2419,46 @@ def pesapal_callback():
 
 @app.route("/", methods=["GET"])
 def health_check():
-    """Health check endpoint to verify the application is running"""
+    """Health check endpoint
+    ---
+    tags:
+      - Health
+    summary: Check API health status
+    description: Returns the current status of the API and available endpoints
+    responses:
+      200:
+        description: API is healthy
+        schema:
+          type: object
+          properties:
+            status:
+              type: string
+              example: healthy
+            service:
+              type: string
+              example: Cashify API
+            version:
+              type: string
+              example: 1.0.0
+            endpoints:
+              type: object
+              properties:
+                products:
+                  type: string
+                  example: /products
+                fees:
+                  type: string
+                  example: /fees
+                upload:
+                  type: string
+                  example: /upload/{platform}
+                escrow:
+                  type: string
+                  example: /escrow/*
+                whatsapp:
+                  type: string
+                  example: /whatsapp
+    """
     return jsonify({
         "status": "healthy",
         "service": "Cashify API",

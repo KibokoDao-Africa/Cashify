@@ -2,6 +2,7 @@ africastalking==1.2.9
 boto3==1.34.59
 Flask~=2.2.2
 flask-cors~=4.0.0
+flasgger==0.9.7.1
 gunicorn==22.0.0
 moviepy==2.2.1
 pymongo~=4.3.3
