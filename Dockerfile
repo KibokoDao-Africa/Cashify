@@ -2,8 +2,8 @@
 # this is useful when you change the requirements.txt file
 ARG CACHEBUST=1
 
-# use this image as the base - FULL image instead of slim for SSL support
-FROM python:3.12
+# use this image as the base - Python 3.11 for better OpenSSL compatibility with MongoDB Atlas
+FROM python:3.11
 
 # set environment variables to prevent python from writing .pyc files and to flush stdout and stderr streams
 # to the console (useful for debugging)

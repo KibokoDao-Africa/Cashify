@@ -77,7 +77,13 @@ swagger = Swagger(app, config=swagger_config, template=swagger_template)
 # MongoDB connection with SSL configuration
 mongo_client = MongoClient(
     os.getenv("MONGODB_URI", "mongodb://localhost:27017/"),
-    tlsCAFile=certifi.where()
+    tlsCAFile=certifi.where(),
+    tls=True,
+    tlsAllowInvalidCertificates=False,
+    tlsAllowInvalidHostnames=False,
+    serverSelectionTimeoutMS=10000,
+    connectTimeoutMS=10000,
+    socketTimeoutMS=10000
 )
 db = mongo_client[os.getenv("MONGODB_DATABASE", "cashify")]
 sessions_collection = db.sessions
