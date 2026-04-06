@@ -4,6 +4,7 @@ from flasgger import Swagger
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
 from pymongo import MongoClient
+import certifi
 import os
 import requests
 import uuid
@@ -73,8 +74,11 @@ swagger_template = {
 
 swagger = Swagger(app, config=swagger_config, template=swagger_template)
 
-# MongoDB connection
-mongo_client = MongoClient(os.getenv("MONGODB_URI", "mongodb://localhost:27017/"))
+# MongoDB connection with SSL configuration
+mongo_client = MongoClient(
+    os.getenv("MONGODB_URI", "mongodb://localhost:27017/"),
+    tlsCAFile=certifi.where()
+)
 db = mongo_client[os.getenv("MONGODB_DATABASE", "cashify")]
 sessions_collection = db.sessions
 products_collection = db.products
