@@ -1,12 +1,12 @@
 africastalking==1.2.9
 boto3==1.34.59
+certifi
 Flask~=2.2.2
 flask-cors~=4.0.0
 flasgger==0.9.7.1
 gunicorn==22.0.0
 moviepy==2.2.1
-pymongo~=4.3.3
+pymongo==4.16.0
 setuptools>=65.0.0
 twilio==9.5.1
 dnspython==2.8.0
-pymongo==4.16.0

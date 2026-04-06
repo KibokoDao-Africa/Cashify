@@ -13,9 +13,9 @@ ENV PYTHONUNBUFFERED 1
 # create a working directory in the container and cd into it
 WORKDIR /bot
 
-# Install ffmpeg
+# Install ffmpeg and SSL certificates for MongoDB Atlas
 RUN apt-get update && \
-    apt-get install -y ffmpeg && \
+    apt-get install -y ffmpeg ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 # upgrade pip and install setuptools first
