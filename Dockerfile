@@ -2,8 +2,8 @@
 # this is useful when you change the requirements.txt file
 ARG CACHEBUST=1
 
-# use this image as the base
-FROM python:3.12-slim
+# use this image as the base - FULL image instead of slim for SSL support
+FROM python:3.12
 
 # set environment variables to prevent python from writing .pyc files and to flush stdout and stderr streams
 # to the console (useful for debugging)
@@ -13,9 +13,10 @@ ENV PYTHONUNBUFFERED 1
 # create a working directory in the container and cd into it
 WORKDIR /bot
 
-# Install ffmpeg and SSL certificates for MongoDB Atlas
+# Install ffmpeg and update CA certificates for MongoDB Atlas SSL
 RUN apt-get update && \
-    apt-get install -y ffmpeg ca-certificates && \
+    apt-get install -y ffmpeg ca-certificates libssl3 openssl && \
+    update-ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 # upgrade pip and install setuptools first
